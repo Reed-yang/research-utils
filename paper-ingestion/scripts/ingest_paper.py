@@ -46,7 +46,9 @@ from urllib.parse import urlparse, unquote
 def get_output_root(output_dir: str | None = None) -> Path:
     """Get output root directory. Defaults to current working directory."""
     if output_dir:
-        return Path(output_dir).resolve()
+        output_root = Path(output_dir).resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+        return output_root
     return Path.cwd()
 
 
@@ -73,6 +75,159 @@ def sanitize_filename(name: str) -> str:
     # Collapse multiple underscores
     sanitized = re.sub(r'_+', '_', sanitized)
     return sanitized
+
+
+def extract_title_from_markdown(markdown_content: str) -> str | None:
+    """Extract title from markdown heading."""
+    title_match = re.search(
+        r'^\s*#{1,3}\s+(.+?)\s*$',
+        markdown_content,
+        re.MULTILINE
+    )
+    if title_match:
+        return title_match.group(1).strip()
+    return None
+
+
+def extract_pdf_metadata_title(pdf_path: Path) -> str | None:
+    """Extract title from PDF metadata if available."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(str(pdf_path))
+        if reader.metadata and reader.metadata.title:
+            return str(reader.metadata.title).strip()
+    except Exception:
+        return None
+    return None
+
+
+def resolve_paper_title(
+    detected_title: str | None,
+    markdown_content: str,
+    pdf_path: Path
+) -> str | None:
+    """Resolve best available title for folder naming."""
+    markdown_title = extract_title_from_markdown(markdown_content)
+    if markdown_title and (
+        not detected_title or looks_like_placeholder_title(detected_title)
+    ):
+        return markdown_title
+    if detected_title:
+        return detected_title
+    metadata_title = extract_pdf_metadata_title(pdf_path)
+    if metadata_title:
+        return metadata_title
+    return None
+
+
+def looks_like_placeholder_title(title: str) -> bool:
+    """Check if title is likely a filename or arXiv id."""
+    normalized = title.strip()
+    if not normalized:
+        return True
+    lowered = normalized.lower()
+    if lowered.endswith(".pdf"):
+        lowered = lowered[:-4]
+    if "http" in lowered or "/" in lowered or "\\" in lowered:
+        return True
+    if re.fullmatch(r'\d{4}\.\d{4,5}(v\d+)?', lowered):
+        return True
+    if re.fullmatch(r'[0-9._-]+', lowered):
+        return True
+    return False
+
+
+def apply_outside_code_blocks(text: str, transform) -> str:
+    """Apply a transform to text outside fenced code blocks."""
+    out = []
+    buffer = []
+    in_code_block = False
+    for line in text.splitlines(keepends=True):
+        if line.strip().startswith("```"):
+            if not in_code_block:
+                if buffer:
+                    out.append(transform("".join(buffer)))
+                    buffer = []
+                in_code_block = True
+            else:
+                if buffer:
+                    out.append("".join(buffer))
+                    buffer = []
+                in_code_block = False
+            out.append(line)
+        else:
+            buffer.append(line)
+    if buffer:
+        if in_code_block:
+            out.append("".join(buffer))
+        else:
+            out.append(transform("".join(buffer)))
+    return "".join(out)
+
+
+def normalize_math_delimiters(text: str) -> str:
+    """Normalize math delimiters to $...$ and $$...$$ for Markdown."""
+    text = re.sub(r'\\\((.+?)\\\)', r'$\1$', text, flags=re.DOTALL)
+    text = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    env_pattern = re.compile(
+        r'\\begin\{(equation\*?|align\*?|multline\*?|gather\*?|split|cases)\}'
+        r'(.*?)\\end\{\1\}',
+        re.DOTALL
+    )
+
+    def wrap_env(match: re.Match) -> str:
+        start, end = match.span()
+        before = text[max(0, start - 2):start]
+        after = text[end:end + 2]
+        if before == "$$" and after == "$$":
+            return match.group(0)
+        return f"$$\n{match.group(0)}\n$$"
+
+    return env_pattern.sub(wrap_env, text)
+
+
+def extract_math_expressions(markdown_content: str) -> list[str]:
+    """Extract math expressions in display or inline form."""
+    pattern = re.compile(r'\$\$(.+?)\$\$|\$(.+?)\$', re.DOTALL)
+    formulas: list[str] = []
+
+    normalized = apply_outside_code_blocks(
+        markdown_content,
+        normalize_math_delimiters
+    )
+
+    def collect(segment: str) -> str:
+        for match in pattern.finditer(segment):
+            if match.group(1) is not None:
+                formulas.append(f"$${match.group(1)}$$")
+            elif match.group(2) is not None:
+                formulas.append(f"${match.group(2)}$")
+        return segment
+
+    apply_outside_code_blocks(normalized, collect)
+    return formulas
+
+
+def replace_formula_placeholders(
+    markdown_content: str,
+    formulas: list[str]
+) -> str:
+    """Replace docling formula placeholders with LaTeX."""
+    index = 0
+
+    def repl(match: re.Match) -> str:
+        nonlocal index
+        if index < len(formulas):
+            value = formulas[index]
+            index += 1
+            return value
+        return match.group(0)
+
+    return re.sub(
+        r'<!--\s*formula-not-decoded\s*-->',
+        repl,
+        markdown_content
+    )
 
 
 def output_json(data: dict) -> None:
@@ -174,6 +329,7 @@ def convert_with_docling(
         pipeline_options = PdfPipelineOptions()
         pipeline_options.generate_picture_images = True
         pipeline_options.generate_table_images = True
+        pipeline_options.do_formula_enrichment = True
         # Higher value => higher resolution (1.0 ~= 72 DPI)
         pipeline_options.images_scale = images_scale
         
@@ -235,11 +391,75 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
     Returns (markdown_content, detected_title).
     """
     try:
+        try:
+            import albumentations as alb
+            if hasattr(alb, "ImageCompression"):
+                original = alb.ImageCompression
+
+                def _compat_image_compression(*args, **kwargs):
+                    if args:
+                        if isinstance(args[0], (int, float)):
+                            quality = int(args[0])
+                            kwargs.setdefault("compression_type", "jpeg")
+                            kwargs.setdefault("quality_range", (quality, quality))
+                            args = ()
+                        elif isinstance(args[0], (tuple, list)) and len(args[0]) == 2:
+                            quality_range = (int(args[0][0]), int(args[0][1]))
+                            kwargs.setdefault("compression_type", "jpeg")
+                            kwargs.setdefault("quality_range", quality_range)
+                            args = ()
+                    return original(*args, **kwargs)
+
+                alb.ImageCompression = _compat_image_compression
+
+            if hasattr(alb, "GaussNoise"):
+                original_noise = alb.GaussNoise
+
+                def _compat_gauss_noise(*args, **kwargs):
+                    if args:
+                        value = args[0]
+                        if isinstance(value, (int, float)):
+                            std = (float(value) / 255.0) ** 0.5
+                            kwargs.setdefault("std_range", (0.0, min(1.0, std)))
+                            args = ()
+                        elif isinstance(value, (tuple, list)) and len(value) == 2:
+                            var_min, var_max = value
+                            std_min = (float(var_min) / 255.0) ** 0.5
+                            std_max = (float(var_max) / 255.0) ** 0.5
+                            kwargs.setdefault(
+                                "std_range",
+                                (min(1.0, std_min), min(1.0, std_max))
+                            )
+                            args = ()
+                    return original_noise(*args, **kwargs)
+
+                alb.GaussNoise = _compat_gauss_noise
+        except Exception:
+            pass
+
         import torch
         from nougat import NougatModel
+        from nougat import model as nougat_model
         from nougat.utils.dataset import LazyDataset
         from nougat.utils.checkpoint import get_checkpoint
         from nougat.postprocessing import markdown_compatible
+        try:
+            from transformers.generation import utils as gen_utils
+
+            def _noop_validate_model_kwargs(self, model_kwargs):
+                return None
+
+            gen_utils.GenerationMixin._validate_model_kwargs = _noop_validate_model_kwargs
+        except Exception:
+            pass
+
+        original_prepare = nougat_model.BARTDecoder.prepare_inputs_for_inference
+
+        def _compat_prepare_inputs_for_inference(self, *args, **kwargs):
+            kwargs.pop("cache_position", None)
+            return original_prepare(self, *args, **kwargs)
+
+        nougat_model.BARTDecoder.prepare_inputs_for_inference = _compat_prepare_inputs_for_inference
         
         # Check GPU availability
         if not torch.cuda.is_available():
@@ -419,7 +639,7 @@ def main():
     parser.add_argument(
         "--images-scale",
         type=float,
-        default=1.0,
+        default=4.0,
         help="Image scale factor for extraction (1.0 ~= 72 DPI). Use >1 for higher resolution."
     )
     parser.add_argument(
@@ -432,7 +652,8 @@ def main():
     
     # Handle URL or local path
     temp_pdf = None
-    if is_url(args.pdf_source):
+    source_is_url = is_url(args.pdf_source)
+    if source_is_url:
         pdf_path = download_pdf(args.pdf_source)
         temp_pdf = pdf_path.parent  # Remember temp dir for cleanup
     else:
@@ -443,9 +664,6 @@ def main():
             output_error(f"Not a PDF file: {pdf_path}")
     
     try:
-        # Prepare assets directory (will be created during conversion if needed)
-        output_root = get_output_root(args.output_dir)
-        
         # Convert based on engine
         engine = args.engine
         if engine == "docling":
@@ -455,13 +673,46 @@ def main():
             markdown_content, detected_title = convert_with_docling(
                 pdf_path, temp_assets, args.images_scale
             )
+            if "<!-- formula-not-decoded -->" in markdown_content:
+                nougat_markdown, _ = convert_with_nougat(pdf_path)
+                formulas = extract_math_expressions(nougat_markdown)
+                if formulas:
+                    markdown_content = replace_formula_placeholders(
+                        markdown_content,
+                        formulas
+                    )
+                else:
+                    output_error(
+                        "Failed to recover LaTeX formulas from nougat output",
+                        "Try running with --engine nougat for full math support"
+                    )
         else:
             markdown_content, detected_title = convert_with_nougat(pdf_path)
             temp_assets = None
         
+        # Normalize math delimiters to $...$ / $$...$$
+        markdown_content = apply_outside_code_blocks(
+            markdown_content,
+            normalize_math_delimiters
+        )
+        resolved_title = resolve_paper_title(
+            detected_title,
+            markdown_content,
+            pdf_path
+        )
+        if not resolved_title and not source_is_url:
+            resolved_title = pdf_path.stem
+        if not resolved_title:
+            resolved_title = "untitled_paper"
+
         # Organize files
         paths = setup_paper_directory(
-            pdf_path, markdown_content, engine, detected_title, args.output_dir, args.force
+            pdf_path,
+            markdown_content,
+            engine,
+            resolved_title,
+            args.output_dir,
+            args.force
         )
         
         # Move assets to final location (for docling)

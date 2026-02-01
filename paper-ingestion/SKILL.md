@@ -49,6 +49,7 @@ Files organized at `{cwd}/{YYYYMMDD}-{Sanitized_Title}/`:
 
 **Naming rules:**
 - Timestamped prefix: `YYYYMMDD-`
+- Title source: Use detected paper title after conversion (not URL string)
 - Windows-safe: No `:?/\*<>|"` characters
 - Duplicate check: Aborts if same title exists (ignoring date)
 
@@ -90,9 +91,13 @@ aliases: []
 
 ## Image Handling
 
-- **Docling**: Extracts images to `assets/` folder
+- **Docling**: Extracts images to `assets/` folder (default 4x resolution)
 - **Markdown references**: `![Fig1](./assets/image_001.png)` (relative paths)
 - **Syncthing compatible**: Small image files sync across devices
+
+## Math Formatting
+
+- Inline and display math are normalized to LaTeX using `$...$` / `$$...$$`
 ---
 name: paper-ingestion
 description: Ingest PDF research papers (local file or URL) and convert to Markdown for AI-native analysis. Use when the user wants to read, ingest, process, or analyze a PDF paper, provides a PDF file path or URL, or mentions paper-readings workflow. Supports docling (fast, extracts images) and nougat (heavy math) engines.
@@ -144,6 +149,7 @@ Files organized at `{cwd}/{YYYYMMDD}-{Sanitized_Title}/`:
 
 **Naming rules:**
 - Timestamped prefix: `YYYYMMDD-`
+- Title source: Use detected paper title after conversion (not URL string)
 - Windows-safe: No `:?/\*<>|"` characters
 - Duplicate check: Aborts if same title exists (ignoring date)
 
@@ -185,6 +191,10 @@ aliases: []
 
 ## Image Handling
 
-- **Docling**: Extracts images to `assets/` folder
+- **Docling**: Extracts images to `assets/` folder (default 4x resolution)
 - **Markdown references**: `![Fig1](./assets/image_001.png)` (relative paths)
 - **Syncthing compatible**: Small image files sync across devices
+
+## Math Formatting
+
+- Inline and display math are normalized to LaTeX using `$...$` / `$$...$$`
