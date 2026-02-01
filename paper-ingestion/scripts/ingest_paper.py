@@ -549,6 +549,116 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
 
 
 # ============================================================================
+# MinerU Backend (High-Quality GPU-Accelerated)
+# ============================================================================
+
+
+def convert_with_mineru(
+    pdf_path: Path,
+    assets_dir: Path,
+) -> tuple[str, str | None]:
+    """
+    Convert PDF to Markdown using MinerU (hybrid-auto-engine for best accuracy).
+    Uses CLI subprocess to avoid import conflicts with other backends.
+    Returns (markdown_content, detected_title).
+    """
+    import subprocess
+
+    # Create temp output directory for MinerU
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            # Run MinerU CLI with high-performance settings
+            result = subprocess.run(
+                [
+                    "mineru",
+                    "-p",
+                    str(pdf_path),
+                    "-o",
+                    tmpdir,
+                    "-b",
+                    "hybrid-auto-engine",  # Best accuracy with GPU
+                    "-l",
+                    "en",  # Optimize for English papers
+                ],
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minute timeout for large PDFs
+            )
+
+            if result.returncode != 0:
+                output_error(
+                    f"MinerU conversion failed: {result.stderr[:500]}",
+                    "Check MinerU installation: uv pip install -U 'mineru[all]'",
+                )
+
+            # Find generated markdown file
+            # MinerU output structure: {output}/{pdf_stem}/hybrid_auto/{pdf_stem}.md
+            output_path = Path(tmpdir)
+            md_files = list(output_path.rglob("*.md"))
+            if not md_files:
+                output_error("MinerU produced no markdown output")
+
+            # Find the main markdown file (prefer one matching PDF stem)
+            pdf_stem = pdf_path.stem
+            md_file = next((f for f in md_files if f.stem == pdf_stem), md_files[0])
+            markdown_content = md_file.read_text(encoding="utf-8")
+
+            # Copy images to assets directory and build name mapping
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            image_map = {}  # old_name -> new_name
+            image_counter = 0
+
+            # Find images directory relative to markdown file
+            images_dir = md_file.parent / "images"
+            if images_dir.exists():
+                for img_file in sorted(images_dir.iterdir()):
+                    if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                        image_counter += 1
+                        new_name = f"image_{image_counter:03d}{img_file.suffix}"
+                        shutil.copy2(img_file, assets_dir / new_name)
+                        # Map: images/hash.jpg -> ./assets/image_001.jpg
+                        old_ref = f"images/{img_file.name}"
+                        image_map[old_ref] = f"./assets/{new_name}"
+
+            # Rewrite image paths in markdown
+            def replace_img_path(match):
+                alt_text = match.group(1)
+                old_path = match.group(2)
+                # Check if this path is in our mapping
+                if old_path in image_map:
+                    return f"![{alt_text}]({image_map[old_path]})"
+                # Try with just the filename
+                for old_ref, new_ref in image_map.items():
+                    if old_ref.endswith(Path(old_path).name):
+                        return f"![{alt_text}]({new_ref})"
+                return match.group(0)
+
+            markdown_content = re.sub(
+                r"!\[([^\]]*)\]\(([^)]+)\)",
+                replace_img_path,
+                markdown_content,
+            )
+
+            # Extract title
+            detected_title = extract_title_from_markdown(markdown_content)
+
+            return markdown_content, detected_title
+
+        except subprocess.TimeoutExpired:
+            output_error(
+                "MinerU conversion timed out (>10 minutes)",
+                "PDF may be too large. Try --engine docling instead.",
+            )
+        except FileNotFoundError:
+            output_error(
+                "MinerU command not found",
+                "Install MinerU: uv pip install -U 'mineru[all]'",
+            )
+        except Exception as e:
+            output_error(f"MinerU conversion failed: {e}")
+
+
+# ============================================================================
 # File Organization
 # ============================================================================
 
@@ -650,9 +760,9 @@ def main():
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["docling", "nougat"],
+        choices=["docling", "nougat", "mineru"],
         default="docling",
-        help="Conversion engine: docling (default, fast) or nougat (slow, better for math)",
+        help="Conversion engine: docling (default, fast), nougat (slow, better for math), mineru (highest quality, GPU)",
     )
     parser.add_argument(
         "--output-dir",
@@ -710,9 +820,16 @@ def main():
                         "Failed to recover LaTeX formulas from nougat output",
                         "Try running with --engine nougat for full math support",
                     )
-        else:
+        elif engine == "nougat":
             markdown_content, detected_title = convert_with_nougat(pdf_path)
             temp_assets = None
+        elif engine == "mineru":
+            # Create temp assets dir for MinerU images
+            temp_assets = Path(tempfile.mkdtemp()) / "assets"
+            temp_assets.mkdir(parents=True, exist_ok=True)
+            markdown_content, detected_title = convert_with_mineru(
+                pdf_path, temp_assets
+            )
 
         # Normalize math delimiters to $...$ / $$...$$
         markdown_content = apply_outside_code_blocks(
@@ -736,8 +853,8 @@ def main():
             args.force,
         )
 
-        # Move assets to final location (for docling)
-        if engine == "docling" and temp_assets and temp_assets.exists():
+        # Move assets to final location (for docling and mineru)
+        if engine in ("docling", "mineru") and temp_assets and temp_assets.exists():
             final_assets = Path(paths["paper_dir"]) / "assets"
             if any(temp_assets.iterdir()):
                 shutil.copytree(temp_assets, final_assets, dirs_exist_ok=True)

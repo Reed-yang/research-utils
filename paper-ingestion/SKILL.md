@@ -1,6 +1,6 @@
 ---
 name: paper-ingestion
-description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Supports docling (fast, tables/figures) and nougat (heavy math) engines.
+description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Supports docling (fast), nougat (heavy math), and mineru (highest quality, GPU) engines.
 ---
 
 # Paper Ingestion Tool
@@ -19,6 +19,9 @@ uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2401.12345.pdf"
 # Heavy math papers (nougat engine)
 uv run scripts/ingest_paper.py paper.pdf --engine nougat
 
+# Highest quality (mineru engine, GPU-accelerated)
+uv run scripts/ingest_paper.py paper.pdf --engine mineru
+
 # Custom output directory
 uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
 ```
@@ -29,7 +32,8 @@ uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
 |----------|--------|-------|
 | General papers, tables, figures | `docling` (default) | Fast, extracts images |
 | Heavy LaTeX math equations | `nougat` | GPU-intensive, slow |
-| Math garbled with docling | `nougat` | Better equation rendering |
+| Highest quality, complex layouts | `mineru` | GPU-accelerated, excellent math/tables |
+| Math garbled with docling | `nougat` or `mineru` | Better equation rendering |
 
 ## Output Structure
 
@@ -89,7 +93,7 @@ aliases: []
 
 ## Image Handling
 
-- **Docling**: Extracts images to `assets/` folder (default 4x resolution)
+- **Docling/Mineru**: Extracts images to `assets/` folder
 - **Markdown references**: `![Fig1](./assets/image_001.png)` (relative paths)
 - **Syncthing compatible**: Small image files sync across devices
 
