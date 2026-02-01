@@ -1,6 +1,6 @@
 ---
 name: paper-ingestion
-description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Supports docling (fast), nougat (heavy math), and mineru (highest quality, GPU) engines.
+description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Uses MinerU (GPU) by default, docling as fallback.
 ---
 
 # Paper Ingestion Tool
@@ -10,17 +10,14 @@ Convert PDF research papers to Markdown with image extraction, organized for AI-
 ## Quick Reference
 
 ```bash
-# From local file (default: docling engine)
+# From local file (default: mineru engine)
 uv run scripts/ingest_paper.py /path/to/paper.pdf
 
 # From URL
 uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2401.12345.pdf"
 
-# Heavy math papers (nougat engine)
-uv run scripts/ingest_paper.py paper.pdf --engine nougat
-
-# Highest quality (mineru engine, GPU-accelerated)
-uv run scripts/ingest_paper.py paper.pdf --engine mineru
+# Fallback engine (docling, fast but lower quality)
+uv run scripts/ingest_paper.py paper.pdf --engine docling
 
 # Custom output directory
 uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
@@ -30,10 +27,8 @@ uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
 
 | Scenario | Engine | Notes |
 |----------|--------|-------|
-| General papers, tables, figures | `docling` (default) | Fast, extracts images |
-| Heavy LaTeX math equations | `nougat` | GPU-intensive, slow |
-| Highest quality, complex layouts | `mineru` | GPU-accelerated, excellent math/tables |
-| Math garbled with docling | `nougat` or `mineru` | Better equation rendering |
+| Default (highest quality) | `mineru` | GPU-accelerated, excellent math/tables |
+| Fallback (fast, no GPU) | `docling` | Lower quality, good for quick previews |
 
 ## Output Structure
 
@@ -44,7 +39,7 @@ Files organized at `{cwd}/{YYYYMMDD}-{Sanitized_Title}/`:
   reference.pdf    # Original PDF
   full_text.md     # Markdown with YAML frontmatter
   notes.md         # Empty notes file
-  assets/          # Extracted images (docling only)
+  assets/          # Extracted images
     image_001.png
     image_002.png
 ```
@@ -62,7 +57,7 @@ Files organized at `{cwd}/{YYYYMMDD}-{Sanitized_Title}/`:
 title: "Paper Title"
 date_ingested: 2026-01-31
 source_pdf: reference.pdf
-conversion_engine: docling
+conversion_engine: mineru
 tags:
   - paper
   - inbox
@@ -74,7 +69,7 @@ aliases: []
 
 **Success:**
 ```json
-{"status": "success", "markdown_path": "...", "title": "...", "date": "2026-01-31", "paper_dir": "...", "engine_used": "docling"}
+{"status": "success", "markdown_path": "...", "title": "...", "date": "2026-01-31", "paper_dir": "...", "engine_used": "mineru"}
 ```
 
 **Error:**
@@ -87,13 +82,12 @@ aliases: []
 | Error | Action |
 |-------|--------|
 | Duplicate detected | Remove existing folder or use `--force` |
-| Nougat OOM | Use `--engine docling` |
-| Math garbled | Re-run with `--engine nougat` |
+| MinerU timeout | Try `--engine docling` |
 | Download failed | Check URL is accessible |
 
 ## Image Handling
 
-- **Docling/Mineru**: Extracts images to `assets/` folder
+- **Both engines**: Extract images to `assets/` folder
 - **Markdown references**: `![Fig1](./assets/image_001.png)` (relative paths)
 - **Syncthing compatible**: Small image files sync across devices
 

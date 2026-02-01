@@ -3,7 +3,6 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "docling>=2.5.0",
-#     "nougat-ocr>=0.1.17",
 #     "torch>=2.0.0",
 #     "pypdf>=4.0.0",
 #     "requests>=2.31.0",
@@ -28,13 +27,16 @@ Output:
 """
 
 import argparse
+import csv
+import io
+import os
+import subprocess
 import json
 import re
 import shutil
 import sys
 import tempfile
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -183,40 +185,6 @@ def normalize_math_delimiters(text: str) -> str:
     return env_pattern.sub(wrap_env, text)
 
 
-def extract_math_expressions(markdown_content: str) -> list[str]:
-    """Extract math expressions in display or inline form."""
-    pattern = re.compile(r"\$\$(.+?)\$\$|\$(.+?)\$", re.DOTALL)
-    formulas: list[str] = []
-
-    normalized = apply_outside_code_blocks(markdown_content, normalize_math_delimiters)
-
-    def collect(segment: str) -> str:
-        for match in pattern.finditer(segment):
-            if match.group(1) is not None:
-                formulas.append(f"$${match.group(1)}$$")
-            elif match.group(2) is not None:
-                formulas.append(f"${match.group(2)}$")
-        return segment
-
-    apply_outside_code_blocks(normalized, collect)
-    return formulas
-
-
-def replace_formula_placeholders(markdown_content: str, formulas: list[str]) -> str:
-    """Replace docling formula placeholders with LaTeX."""
-    index = 0
-
-    def repl(match: re.Match) -> str:
-        nonlocal index
-        if index < len(formulas):
-            value = formulas[index]
-            index += 1
-            return value
-        return match.group(0)
-
-    return re.sub(r"<!--\s*formula-not-decoded\s*-->", repl, markdown_content)
-
-
 def replace_image_placeholders(markdown_content: str, image_count: int) -> str:
     """Replace <!-- image --> placeholders with actual image references."""
     counter = [0]  # Use list to allow mutation in nested function
@@ -335,6 +303,48 @@ def check_duplicate(sanitized_title: str, output_root: Path) -> bool:
 # ============================================================================
 
 
+def get_best_free_gpu(max_memory_mb=2000, max_util_percent=10) -> str | None:
+    """
+    Get index of the best free GPU (lowest memory usage).
+    Returns None if no GPU is free or nvidia-smi fails.
+    """
+    try:
+        # Check nvidia-smi
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.used,utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+
+        reader = csv.reader(io.StringIO(result.stdout.strip()))
+        free_gpus = []
+        for row in reader:
+            try:
+                idx, mem, util = map(int, row)
+                if mem < max_memory_mb and util < max_util_percent:
+                    free_gpus.append((idx, mem))
+            except ValueError:
+                continue
+
+        if not free_gpus:
+            return None
+
+        # Sort by memory usage (ascending)
+        free_gpus.sort(key=lambda x: x[1])
+        return str(free_gpus[0][0])
+
+    except FileNotFoundError:
+        return None  # nvidia-smi not found
+    except Exception:
+        return None
+
+
 def convert_with_docling(
     pdf_path: Path, assets_dir: Path, images_scale: float
 ) -> tuple[str, str | None]:
@@ -399,156 +409,6 @@ def convert_with_docling(
 
 
 # ============================================================================
-# Nougat Backend
-# ============================================================================
-
-
-def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
-    """
-    Convert PDF to Markdown using Meta Nougat (GPU-intensive).
-    Returns (markdown_content, detected_title).
-    """
-    try:
-        try:
-            import albumentations as alb
-
-            if hasattr(alb, "ImageCompression"):
-                original = alb.ImageCompression
-
-                def _compat_image_compression(*args, **kwargs):
-                    if args:
-                        if isinstance(args[0], (int, float)):
-                            quality = int(args[0])
-                            kwargs.setdefault("compression_type", "jpeg")
-                            kwargs.setdefault("quality_range", (quality, quality))
-                            args = ()
-                        elif isinstance(args[0], (tuple, list)) and len(args[0]) == 2:
-                            quality_range = (int(args[0][0]), int(args[0][1]))
-                            kwargs.setdefault("compression_type", "jpeg")
-                            kwargs.setdefault("quality_range", quality_range)
-                            args = ()
-                    return original(*args, **kwargs)
-
-                alb.ImageCompression = _compat_image_compression
-
-            if hasattr(alb, "GaussNoise"):
-                original_noise = alb.GaussNoise
-
-                def _compat_gauss_noise(*args, **kwargs):
-                    if args:
-                        value = args[0]
-                        if isinstance(value, (int, float)):
-                            std = (float(value) / 255.0) ** 0.5
-                            kwargs.setdefault("std_range", (0.0, min(1.0, std)))
-                            args = ()
-                        elif isinstance(value, (tuple, list)) and len(value) == 2:
-                            var_min, var_max = value
-                            std_min = (float(var_min) / 255.0) ** 0.5
-                            std_max = (float(var_max) / 255.0) ** 0.5
-                            kwargs.setdefault(
-                                "std_range", (min(1.0, std_min), min(1.0, std_max))
-                            )
-                            args = ()
-                    return original_noise(*args, **kwargs)
-
-                alb.GaussNoise = _compat_gauss_noise
-        except Exception:
-            pass
-
-        import torch
-        from nougat import NougatModel
-        from nougat import model as nougat_model
-        from nougat.utils.dataset import LazyDataset
-        from nougat.utils.checkpoint import get_checkpoint
-        from nougat.postprocessing import markdown_compatible
-
-        try:
-            from transformers.generation import utils as gen_utils
-
-            def _noop_validate_model_kwargs(self, model_kwargs):
-                return None
-
-            gen_utils.GenerationMixin._validate_model_kwargs = (
-                _noop_validate_model_kwargs
-            )
-        except Exception:
-            pass
-
-        original_prepare = nougat_model.BARTDecoder.prepare_inputs_for_inference
-
-        def _compat_prepare_inputs_for_inference(self, *args, **kwargs):
-            kwargs.pop("cache_position", None)
-            return original_prepare(self, *args, **kwargs)
-
-        nougat_model.BARTDecoder.prepare_inputs_for_inference = (
-            _compat_prepare_inputs_for_inference
-        )
-
-        # Check GPU availability
-        if not torch.cuda.is_available():
-            output_error(
-                "Nougat requires CUDA GPU but none detected",
-                "Try using --engine docling instead",
-            )
-
-        # Load model
-        checkpoint = get_checkpoint(None, model_tag="0.1.0-small")
-        model = NougatModel.from_pretrained(checkpoint)
-        model = model.to(torch.bfloat16)
-        model = model.cuda()
-        model.eval()
-
-        # Process PDF
-        dataset = LazyDataset(
-            pdf_path,
-            partial(model.encoder.prepare_input, random_padding=False),
-        )
-
-        dataloader = torch.utils.data.DataLoader(
-            dataset,
-            batch_size=1,
-            shuffle=False,
-            collate_fn=LazyDataset.ignore_none_collate,
-        )
-
-        predictions = []
-        for sample, is_last_page in dataloader:
-            model_output = model.inference(image_tensors=sample.cuda())
-            output = model_output["predictions"][0]
-            if model.config.model_type == "nougat":
-                output = markdown_compatible(output)
-            predictions.append(output)
-            if is_last_page:
-                break
-
-        markdown_content = "\n\n".join(predictions)
-
-        # Try to extract title from first heading
-        detected_title = None
-        title_match = re.search(r"^#\s+(.+)$", markdown_content, re.MULTILINE)
-        if title_match:
-            detected_title = title_match.group(1).strip()
-
-        return markdown_content, detected_title
-
-    except Exception as e:
-        if "OutOfMemoryError" in str(type(e).__name__):
-            output_error(
-                "Nougat failed: CUDA Out of Memory",
-                "Try using --engine docling which is more memory-efficient",
-            )
-        elif isinstance(e, ImportError):
-            output_error(
-                f"Nougat import failed: {e}",
-                "Ensure nougat-ocr is installed with GPU support",
-            )
-        else:
-            output_error(
-                f"Nougat conversion failed: {e}", "Try using --engine docling instead"
-            )
-
-
-# ============================================================================
 # MinerU Backend (High-Quality GPU-Accelerated)
 # ============================================================================
 
@@ -560,102 +420,118 @@ def convert_with_mineru(
     """
     Convert PDF to Markdown using MinerU (hybrid-auto-engine for best accuracy).
     Uses CLI subprocess to avoid import conflicts with other backends.
+
+    Automatically selects the best available GPU.
+
     Returns (markdown_content, detected_title).
     """
     import subprocess
 
-    # Create temp output directory for MinerU
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            # Run MinerU CLI with high-performance settings
-            result = subprocess.run(
-                [
-                    "mineru",
-                    "-p",
-                    str(pdf_path),
-                    "-o",
-                    tmpdir,
-                    "-b",
-                    "hybrid-auto-engine",  # Best accuracy with GPU
-                    "-l",
-                    "en",  # Optimize for English papers
-                ],
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10 minute timeout for large PDFs
-            )
+    # Create temporary directory for MinerU output
+    tmpdir = tempfile.mkdtemp()
 
-            if result.returncode != 0:
-                output_error(
-                    f"MinerU conversion failed: {result.stderr[:500]}",
-                    "Check MinerU installation: uv pip install -U 'mineru[all]'",
-                )
+    # Detect best free GPU
+    gpu_idx = get_best_free_gpu()
+    env = os.environ.copy()
 
-            # Find generated markdown file
-            # MinerU output structure: {output}/{pdf_stem}/hybrid_auto/{pdf_stem}.md
-            output_path = Path(tmpdir)
-            md_files = list(output_path.rglob("*.md"))
-            if not md_files:
-                output_error("MinerU produced no markdown output")
+    if gpu_idx:
+        env["CUDA_VISIBLE_DEVICES"] = gpu_idx
+        print(f"MinerU using GPU: {gpu_idx}", file=sys.stderr)
+    else:
+        print("MinerU: No free GPU found, using default/CPU", file=sys.stderr)
 
-            # Find the main markdown file (prefer one matching PDF stem)
-            pdf_stem = pdf_path.stem
-            md_file = next((f for f in md_files if f.stem == pdf_stem), md_files[0])
-            markdown_content = md_file.read_text(encoding="utf-8")
+    try:
+        result = subprocess.run(
+            [
+                "mineru",
+                "-p",
+                str(pdf_path),
+                "-o",
+                tmpdir,
+                "-b",
+                "hybrid-auto-engine",
+                "-l",
+                "en",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
 
-            # Copy images to assets directory and build name mapping
-            assets_dir.mkdir(parents=True, exist_ok=True)
-            image_map = {}  # old_name -> new_name
-            image_counter = 0
-
-            # Find images directory relative to markdown file
-            images_dir = md_file.parent / "images"
-            if images_dir.exists():
-                for img_file in sorted(images_dir.iterdir()):
-                    if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
-                        image_counter += 1
-                        new_name = f"image_{image_counter:03d}{img_file.suffix}"
-                        shutil.copy2(img_file, assets_dir / new_name)
-                        # Map: images/hash.jpg -> ./assets/image_001.jpg
-                        old_ref = f"images/{img_file.name}"
-                        image_map[old_ref] = f"./assets/{new_name}"
-
-            # Rewrite image paths in markdown
-            def replace_img_path(match):
-                alt_text = match.group(1)
-                old_path = match.group(2)
-                # Check if this path is in our mapping
-                if old_path in image_map:
-                    return f"![{alt_text}]({image_map[old_path]})"
-                # Try with just the filename
-                for old_ref, new_ref in image_map.items():
-                    if old_ref.endswith(Path(old_path).name):
-                        return f"![{alt_text}]({new_ref})"
-                return match.group(0)
-
-            markdown_content = re.sub(
-                r"!\[([^\]]*)\]\(([^)]+)\)",
-                replace_img_path,
-                markdown_content,
-            )
-
-            # Extract title
-            detected_title = extract_title_from_markdown(markdown_content)
-
-            return markdown_content, detected_title
-
-        except subprocess.TimeoutExpired:
+        if result.returncode != 0:
+            if "Check MinerU installation" in result.stderr:
+                pass
             output_error(
-                "MinerU conversion timed out (>10 minutes)",
-                "PDF may be too large. Try --engine docling instead.",
+                f"MinerU conversion failed: {result.stderr[:500]}",
+                "Check MinerU installation: uv pip install -U 'mineru[all]'",
             )
-        except FileNotFoundError:
-            output_error(
-                "MinerU command not found",
-                "Install MinerU: uv pip install -U 'mineru[all]'",
-            )
-        except Exception as e:
-            output_error(f"MinerU conversion failed: {e}")
+
+        # Find generated markdown file
+        # MinerU output structure: {output}/{pdf_stem}/hybrid_auto/{pdf_stem}.md
+        output_path = Path(tmpdir)
+        md_files = list(output_path.rglob("*.md"))
+        if not md_files:
+            output_error("MinerU produced no markdown output")
+
+        # Find the main markdown file (prefer one matching PDF stem)
+        pdf_stem = pdf_path.stem
+        md_file = next((f for f in md_files if f.stem == pdf_stem), md_files[0])
+        markdown_content = md_file.read_text(encoding="utf-8")
+
+        # Copy images to assets directory and build name mapping
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        image_map = {}  # old_name -> new_name
+        image_counter = 0
+
+        # Find images directory relative to markdown file
+        images_dir = md_file.parent / "images"
+        if images_dir.exists():
+            for img_file in sorted(images_dir.iterdir()):
+                if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    image_counter += 1
+                    new_name = f"image_{image_counter:03d}{img_file.suffix}"
+                    shutil.copy2(img_file, assets_dir / new_name)
+                    # Map: images/hash.jpg -> ./assets/image_001.jpg
+                    old_ref = f"images/{img_file.name}"
+                    image_map[old_ref] = f"./assets/{new_name}"
+
+        # Rewrite image paths in markdown
+        def replace_img_path(match):
+            alt_text = match.group(1)
+            old_path = match.group(2)
+            # Check if this path is in our mapping
+            if old_path in image_map:
+                return f"![{alt_text}]({image_map[old_path]})"
+            # Try with just the filename
+            for old_ref, new_ref in image_map.items():
+                if old_ref.endswith(Path(old_path).name):
+                    return f"![{alt_text}]({new_ref})"
+            return match.group(0)
+
+        markdown_content = re.sub(
+            r"!\[([^\]]*)\]\(([^)]+)\)",
+            replace_img_path,
+            markdown_content,
+        )
+
+        # Extract title
+        detected_title = extract_title_from_markdown(markdown_content)
+
+        return markdown_content, detected_title
+
+    except subprocess.TimeoutExpired:
+        output_error(
+            "MinerU conversion timed out (>10 minutes)",
+            "PDF may be too large. Try --engine docling instead.",
+        )
+    except FileNotFoundError:
+        output_error(
+            "MinerU command not found",
+            "Install MinerU: uv pip install -U 'mineru[all]'",
+        )
+    except Exception as e:
+        output_error(f"MinerU conversion failed: {e}")
 
 
 # ============================================================================
@@ -760,9 +636,9 @@ def main():
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["docling", "nougat", "mineru"],
-        default="docling",
-        help="Conversion engine: docling (default, fast), nougat (slow, better for math), mineru (highest quality, GPU)",
+        choices=["mineru", "docling"],
+        default="mineru",
+        help="Conversion engine: mineru (default, highest quality, GPU), docling (fallback, fast)",
     )
     parser.add_argument(
         "--output-dir",
@@ -801,34 +677,16 @@ def main():
     try:
         # Convert based on engine
         engine = args.engine
-        if engine == "docling":
-            # Create temp assets dir, will be moved later
-            temp_assets = Path(tempfile.mkdtemp()) / "assets"
-            temp_assets.mkdir(parents=True, exist_ok=True)
-            markdown_content, detected_title = convert_with_docling(
-                pdf_path, temp_assets, args.images_scale
-            )
-            if "<!-- formula-not-decoded -->" in markdown_content:
-                nougat_markdown, _ = convert_with_nougat(pdf_path)
-                formulas = extract_math_expressions(nougat_markdown)
-                if formulas:
-                    markdown_content = replace_formula_placeholders(
-                        markdown_content, formulas
-                    )
-                else:
-                    output_error(
-                        "Failed to recover LaTeX formulas from nougat output",
-                        "Try running with --engine nougat for full math support",
-                    )
-        elif engine == "nougat":
-            markdown_content, detected_title = convert_with_nougat(pdf_path)
-            temp_assets = None
-        elif engine == "mineru":
-            # Create temp assets dir for MinerU images
-            temp_assets = Path(tempfile.mkdtemp()) / "assets"
-            temp_assets.mkdir(parents=True, exist_ok=True)
+        temp_assets = Path(tempfile.mkdtemp()) / "assets"
+        temp_assets.mkdir(parents=True, exist_ok=True)
+
+        if engine == "mineru":
             markdown_content, detected_title = convert_with_mineru(
                 pdf_path, temp_assets
+            )
+        elif engine == "docling":
+            markdown_content, detected_title = convert_with_docling(
+                pdf_path, temp_assets, args.images_scale
             )
 
         # Normalize math delimiters to $...$ / $$...$$
