@@ -43,6 +43,7 @@ from urllib.parse import urlparse, unquote
 # Configuration
 # ============================================================================
 
+
 def get_output_root(output_dir: str | None = None) -> Path:
     """Get output root directory. Defaults to current working directory."""
     if output_dir:
@@ -56,6 +57,7 @@ def get_output_root(output_dir: str | None = None) -> Path:
 # Utility Functions
 # ============================================================================
 
+
 def sanitize_filename(name: str) -> str:
     r"""
     Convert filename to a Windows-safe folder name.
@@ -65,25 +67,21 @@ def sanitize_filename(name: str) -> str:
     # Remove extension
     stem = Path(name).stem
     # Remove Windows-invalid characters: : ? / \ * < > | "
-    sanitized = re.sub(r'[:\?/\\*<>|"]', '', stem)
+    sanitized = re.sub(r'[:\?/\\*<>|"]', "", stem)
     # Replace spaces and multiple hyphens with underscores
-    sanitized = re.sub(r'[-\s]+', '_', sanitized)
+    sanitized = re.sub(r"[-\s]+", "_", sanitized)
     # Remove any other non-word characters except underscores
-    sanitized = re.sub(r'[^\w_]', '', sanitized)
+    sanitized = re.sub(r"[^\w_]", "", sanitized)
     # Remove leading/trailing underscores
-    sanitized = sanitized.strip('_')
+    sanitized = sanitized.strip("_")
     # Collapse multiple underscores
-    sanitized = re.sub(r'_+', '_', sanitized)
+    sanitized = re.sub(r"_+", "_", sanitized)
     return sanitized
 
 
 def extract_title_from_markdown(markdown_content: str) -> str | None:
     """Extract title from markdown heading."""
-    title_match = re.search(
-        r'^\s*#{1,3}\s+(.+?)\s*$',
-        markdown_content,
-        re.MULTILINE
-    )
+    title_match = re.search(r"^\s*#{1,3}\s+(.+?)\s*$", markdown_content, re.MULTILINE)
     if title_match:
         return title_match.group(1).strip()
     return None
@@ -93,6 +91,7 @@ def extract_pdf_metadata_title(pdf_path: Path) -> str | None:
     """Extract title from PDF metadata if available."""
     try:
         from pypdf import PdfReader
+
         reader = PdfReader(str(pdf_path))
         if reader.metadata and reader.metadata.title:
             return str(reader.metadata.title).strip()
@@ -102,9 +101,7 @@ def extract_pdf_metadata_title(pdf_path: Path) -> str | None:
 
 
 def resolve_paper_title(
-    detected_title: str | None,
-    markdown_content: str,
-    pdf_path: Path
+    detected_title: str | None, markdown_content: str, pdf_path: Path
 ) -> str | None:
     """Resolve best available title for folder naming."""
     markdown_title = extract_title_from_markdown(markdown_content)
@@ -130,9 +127,9 @@ def looks_like_placeholder_title(title: str) -> bool:
         lowered = lowered[:-4]
     if "http" in lowered or "/" in lowered or "\\" in lowered:
         return True
-    if re.fullmatch(r'\d{4}\.\d{4,5}(v\d+)?', lowered):
+    if re.fullmatch(r"\d{4}\.\d{4,5}(v\d+)?", lowered):
         return True
-    if re.fullmatch(r'[0-9._-]+', lowered):
+    if re.fullmatch(r"[0-9._-]+", lowered):
         return True
     return False
 
@@ -167,18 +164,18 @@ def apply_outside_code_blocks(text: str, transform) -> str:
 
 def normalize_math_delimiters(text: str) -> str:
     """Normalize math delimiters to $...$ and $$...$$ for Markdown."""
-    text = re.sub(r'\\\((.+?)\\\)', r'$\1$', text, flags=re.DOTALL)
-    text = re.sub(r'\\\[(.+?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    text = re.sub(r"\\\((.+?)\\\)", r"$\1$", text, flags=re.DOTALL)
+    text = re.sub(r"\\\[(.+?)\\\]", r"$$\1$$", text, flags=re.DOTALL)
     env_pattern = re.compile(
-        r'\\begin\{(equation\*?|align\*?|multline\*?|gather\*?|split|cases)\}'
-        r'(.*?)\\end\{\1\}',
-        re.DOTALL
+        r"\\begin\{(equation\*?|align\*?|multline\*?|gather\*?|split|cases)\}"
+        r"(.*?)\\end\{\1\}",
+        re.DOTALL,
     )
 
     def wrap_env(match: re.Match) -> str:
         start, end = match.span()
-        before = text[max(0, start - 2):start]
-        after = text[end:end + 2]
+        before = text[max(0, start - 2) : start]
+        after = text[end : end + 2]
         if before == "$$" and after == "$$":
             return match.group(0)
         return f"$$\n{match.group(0)}\n$$"
@@ -188,13 +185,10 @@ def normalize_math_delimiters(text: str) -> str:
 
 def extract_math_expressions(markdown_content: str) -> list[str]:
     """Extract math expressions in display or inline form."""
-    pattern = re.compile(r'\$\$(.+?)\$\$|\$(.+?)\$', re.DOTALL)
+    pattern = re.compile(r"\$\$(.+?)\$\$|\$(.+?)\$", re.DOTALL)
     formulas: list[str] = []
 
-    normalized = apply_outside_code_blocks(
-        markdown_content,
-        normalize_math_delimiters
-    )
+    normalized = apply_outside_code_blocks(markdown_content, normalize_math_delimiters)
 
     def collect(segment: str) -> str:
         for match in pattern.finditer(segment):
@@ -208,10 +202,7 @@ def extract_math_expressions(markdown_content: str) -> list[str]:
     return formulas
 
 
-def replace_formula_placeholders(
-    markdown_content: str,
-    formulas: list[str]
-) -> str:
+def replace_formula_placeholders(markdown_content: str, formulas: list[str]) -> str:
     """Replace docling formula placeholders with LaTeX."""
     index = 0
 
@@ -223,11 +214,43 @@ def replace_formula_placeholders(
             return value
         return match.group(0)
 
-    return re.sub(
-        r'<!--\s*formula-not-decoded\s*-->',
-        repl,
-        markdown_content
-    )
+    return re.sub(r"<!--\s*formula-not-decoded\s*-->", repl, markdown_content)
+
+
+def replace_image_placeholders(markdown_content: str, image_count: int) -> str:
+    """Replace <!-- image --> placeholders with actual image references."""
+    counter = [0]  # Use list to allow mutation in nested function
+
+    def replacer(match):
+        counter[0] += 1
+        if counter[0] <= image_count:
+            return f"![Figure {counter[0]}](./assets/image_{counter[0]:03d}.png)"
+        return match.group(0)
+
+    return re.sub(r"<!--\s*image\s*-->", replacer, markdown_content)
+
+
+def wrap_inline_math(text: str) -> str:
+    """
+    Wrap common inline math patterns in $...$ delimiters.
+    Applied outside code blocks only.
+    """
+
+    def transform(segment: str) -> str:
+        # Variables with subscripts: x_i, P_ref, z_0, etc.
+        segment = re.sub(r"\b([A-Za-z])\s*([_])\s*(\w+)\b", r"$\1_\3$", segment)
+
+        # Greek letters as standalone
+        greek = r"[αβγδεζηθικλμνξοπρστυφχψωΑΒΓΔΘΛΞΠΣΦΨΩ∈∀∃∅∇∞∝∑∏∫∂]"
+        segment = re.sub(rf"(?<![\$A-Za-z])({greek})(?![A-Za-z])", r"$\1$", segment)
+
+        # Comparison operators with numbers: 1 ≤ j ≤ N
+        segment = re.sub(r"(\d+)\s*([≤≥≈≠<>])\s*(\w+)", r"$\1 \2 \3$", segment)
+        segment = re.sub(r"(\w+)\s*([≤≥≈≠])\s*(\d+)", r"$\1 \2 \3$", segment)
+
+        return segment
+
+    return apply_outside_code_blocks(text, transform)
 
 
 def output_json(data: dict) -> None:
@@ -247,42 +270,42 @@ def output_error(message: str, suggestion: str = None) -> None:
 def is_url(path: str) -> bool:
     """Check if the input is a URL."""
     parsed = urlparse(path)
-    return parsed.scheme in ('http', 'https')
+    return parsed.scheme in ("http", "https")
 
 
 def download_pdf(url: str) -> Path:
     """Download PDF from URL to a temporary file."""
     import requests
-    
+
     try:
         response = requests.get(url, timeout=60, stream=True)
         response.raise_for_status()
-        
+
         # Try to get filename from Content-Disposition or URL
         filename = None
-        if 'Content-Disposition' in response.headers:
-            cd = response.headers['Content-Disposition']
-            if 'filename=' in cd:
-                filename = cd.split('filename=')[-1].strip('"\'')
-        
+        if "Content-Disposition" in response.headers:
+            cd = response.headers["Content-Disposition"]
+            if "filename=" in cd:
+                filename = cd.split("filename=")[-1].strip("\"'")
+
         if not filename:
             # Extract from URL path
             url_path = urlparse(url).path
             filename = unquote(Path(url_path).name)
-        
-        if not filename or not filename.lower().endswith('.pdf'):
-            filename = 'downloaded_paper.pdf'
-        
+
+        if not filename or not filename.lower().endswith(".pdf"):
+            filename = "downloaded_paper.pdf"
+
         # Save to temp file
         temp_dir = Path(tempfile.mkdtemp())
         temp_path = temp_dir / filename
-        
-        with open(temp_path, 'wb') as f:
+
+        with open(temp_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        
+
         return temp_path
-        
+
     except requests.RequestException as e:
         output_error(f"Failed to download PDF: {e}")
 
@@ -297,11 +320,11 @@ def check_duplicate(sanitized_title: str, output_root: Path) -> bool:
         if item.is_dir():
             dir_name = item.name
             # Remove date prefix if present (format: YYYYMMDD-)
-            if re.match(r'^\d{8}-', dir_name):
+            if re.match(r"^\d{8}-", dir_name):
                 existing_title = dir_name[9:]  # Skip "YYYYMMDD-"
             else:
                 existing_title = dir_name
-            
+
             if existing_title == sanitized_title:
                 return True
     return False
@@ -311,10 +334,9 @@ def check_duplicate(sanitized_title: str, output_root: Path) -> bool:
 # Docling Backend (with Image Extraction)
 # ============================================================================
 
+
 def convert_with_docling(
-    pdf_path: Path,
-    assets_dir: Path,
-    images_scale: float
+    pdf_path: Path, assets_dir: Path, images_scale: float
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using IBM Docling with image extraction.
@@ -324,7 +346,7 @@ def convert_with_docling(
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.datamodel.base_models import InputFormat
-        
+
         # Configure pipeline with image extraction
         pipeline_options = PdfPipelineOptions()
         pipeline_options.generate_picture_images = True
@@ -332,50 +354,45 @@ def convert_with_docling(
         pipeline_options.do_formula_enrichment = True
         # Higher value => higher resolution (1.0 ~= 72 DPI)
         pipeline_options.images_scale = images_scale
-        
+
         converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
             }
         )
-        
+
         result = converter.convert(str(pdf_path))
         doc = result.document
-        
+
         # Extract title from document metadata
         detected_title = None
-        if hasattr(doc, 'name') and doc.name:
+        if hasattr(doc, "name") and doc.name:
             detected_title = doc.name
-        
+
         # Export markdown
         markdown_content = doc.export_to_markdown(image_mode="referenced")
-        
+
         # Save images to assets directory and rewrite paths
         assets_dir.mkdir(parents=True, exist_ok=True)
         image_counter = 0
-        
-        if hasattr(doc, 'pictures') and doc.pictures:
+
+        if hasattr(doc, "pictures") and doc.pictures:
             for pic in doc.pictures:
-                if hasattr(pic, 'image') and pic.image:
+                if hasattr(pic, "image") and pic.image:
                     image_counter += 1
                     image_name = f"image_{image_counter:03d}.png"
                     image_path = assets_dir / image_name
                     pic.image.pil_image.save(str(image_path))
-        
-        # Rewrite image paths to relative format ./assets/
-        # Docling may use various formats, normalize to ./assets/image_xxx.png
-        markdown_content = re.sub(
-            r'!\[([^\]]*)\]\([^)]+/([^/)]+)\)',
-            r'![\1](./assets/\2)',
-            markdown_content
-        )
-        
+
+        # Replace <!-- image --> placeholders with actual image references
+        markdown_content = replace_image_placeholders(markdown_content, image_counter)
+
         return markdown_content, detected_title
-        
+
     except ImportError as e:
         output_error(
             f"Docling import failed: {e}",
-            "Ensure docling is installed: uv pip install docling"
+            "Ensure docling is installed: uv pip install docling",
         )
     except Exception as e:
         output_error(f"Docling conversion failed: {e}")
@@ -385,6 +402,7 @@ def convert_with_docling(
 # Nougat Backend
 # ============================================================================
 
+
 def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using Meta Nougat (GPU-intensive).
@@ -393,6 +411,7 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
     try:
         try:
             import albumentations as alb
+
             if hasattr(alb, "ImageCompression"):
                 original = alb.ImageCompression
 
@@ -427,8 +446,7 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
                             std_min = (float(var_min) / 255.0) ** 0.5
                             std_max = (float(var_max) / 255.0) ** 0.5
                             kwargs.setdefault(
-                                "std_range",
-                                (min(1.0, std_min), min(1.0, std_max))
+                                "std_range", (min(1.0, std_min), min(1.0, std_max))
                             )
                             args = ()
                     return original_noise(*args, **kwargs)
@@ -443,13 +461,16 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
         from nougat.utils.dataset import LazyDataset
         from nougat.utils.checkpoint import get_checkpoint
         from nougat.postprocessing import markdown_compatible
+
         try:
             from transformers.generation import utils as gen_utils
 
             def _noop_validate_model_kwargs(self, model_kwargs):
                 return None
 
-            gen_utils.GenerationMixin._validate_model_kwargs = _noop_validate_model_kwargs
+            gen_utils.GenerationMixin._validate_model_kwargs = (
+                _noop_validate_model_kwargs
+            )
         except Exception:
             pass
 
@@ -459,35 +480,37 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
             kwargs.pop("cache_position", None)
             return original_prepare(self, *args, **kwargs)
 
-        nougat_model.BARTDecoder.prepare_inputs_for_inference = _compat_prepare_inputs_for_inference
-        
+        nougat_model.BARTDecoder.prepare_inputs_for_inference = (
+            _compat_prepare_inputs_for_inference
+        )
+
         # Check GPU availability
         if not torch.cuda.is_available():
             output_error(
                 "Nougat requires CUDA GPU but none detected",
-                "Try using --engine docling instead"
+                "Try using --engine docling instead",
             )
-        
+
         # Load model
         checkpoint = get_checkpoint(None, model_tag="0.1.0-small")
         model = NougatModel.from_pretrained(checkpoint)
         model = model.to(torch.bfloat16)
         model = model.cuda()
         model.eval()
-        
+
         # Process PDF
         dataset = LazyDataset(
             pdf_path,
             partial(model.encoder.prepare_input, random_padding=False),
         )
-        
+
         dataloader = torch.utils.data.DataLoader(
             dataset,
             batch_size=1,
             shuffle=False,
             collate_fn=LazyDataset.ignore_none_collate,
         )
-        
+
         predictions = []
         for sample, is_last_page in dataloader:
             model_output = model.inference(image_tensors=sample.cuda())
@@ -497,32 +520,31 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
             predictions.append(output)
             if is_last_page:
                 break
-        
+
         markdown_content = "\n\n".join(predictions)
-        
+
         # Try to extract title from first heading
         detected_title = None
-        title_match = re.search(r'^#\s+(.+)$', markdown_content, re.MULTILINE)
+        title_match = re.search(r"^#\s+(.+)$", markdown_content, re.MULTILINE)
         if title_match:
             detected_title = title_match.group(1).strip()
-        
+
         return markdown_content, detected_title
-        
+
     except Exception as e:
-        if 'OutOfMemoryError' in str(type(e).__name__):
+        if "OutOfMemoryError" in str(type(e).__name__):
             output_error(
                 "Nougat failed: CUDA Out of Memory",
-                "Try using --engine docling which is more memory-efficient"
+                "Try using --engine docling which is more memory-efficient",
             )
         elif isinstance(e, ImportError):
             output_error(
                 f"Nougat import failed: {e}",
-                "Ensure nougat-ocr is installed with GPU support"
+                "Ensure nougat-ocr is installed with GPU support",
             )
         else:
             output_error(
-                f"Nougat conversion failed: {e}",
-                "Try using --engine docling instead"
+                f"Nougat conversion failed: {e}", "Try using --engine docling instead"
             )
 
 
@@ -530,17 +552,18 @@ def convert_with_nougat(pdf_path: Path) -> tuple[str, str | None]:
 # File Organization
 # ============================================================================
 
+
 def setup_paper_directory(
     pdf_path: Path,
     markdown_content: str,
     engine: str,
     detected_title: str | None,
     output_dir: str | None = None,
-    allow_duplicate: bool = False
+    allow_duplicate: bool = False,
 ) -> dict:
     """
     Organize files with timestamped folder naming.
-    
+
     Structure:
       {cwd}/{YYYYMMDD}-{Sanitized_Title}/
         reference.pdf    - Original PDF (copied)
@@ -551,33 +574,35 @@ def setup_paper_directory(
     today = datetime.now()
     date_str = today.strftime("%Y%m%d")
     date_iso = today.strftime("%Y-%m-%d")
-    
+
     # Use detected title or fall back to filename
     title_source = detected_title if detected_title else pdf_path.stem
     sanitized_title = sanitize_filename(title_source)
-    
+
     output_root = get_output_root(output_dir)
-    
+
     # Check for duplicates
     if not allow_duplicate and check_duplicate(sanitized_title, output_root):
         output_error(
             f"Duplicate detected: A folder with title '{sanitized_title}' already exists",
-            "Remove the existing folder or rename if you want to re-ingest"
+            "Remove the existing folder or rename if you want to re-ingest",
         )
-    
+
     # Create timestamped folder name
     folder_name = f"{date_str}-{sanitized_title}"
     paper_dir = output_root / folder_name
-    
+
     # Create directory
     paper_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Copy original PDF
     reference_pdf = paper_dir / "reference.pdf"
     shutil.copy2(pdf_path, reference_pdf)
-    
+
     # Create YAML frontmatter
-    display_title = detected_title if detected_title else sanitized_title.replace('_', ' ')
+    display_title = (
+        detected_title if detected_title else sanitized_title.replace("_", " ")
+    )
     frontmatter = f"""---
 title: "{display_title}"
 date_ingested: {date_iso}
@@ -590,16 +615,16 @@ aliases: []
 ---
 
 """
-    
+
     # Save Markdown with frontmatter
     full_text_path = paper_dir / "full_text.md"
     full_text_path.write_text(frontmatter + markdown_content, encoding="utf-8")
-    
+
     # Create empty notes file
     notes_path = paper_dir / "notes.md"
     if not notes_path.exists():
         notes_path.write_text(f"# Notes: {display_title}\n\n", encoding="utf-8")
-    
+
     return {
         "paper_dir": str(paper_dir),
         "markdown_path": str(full_text_path),
@@ -614,42 +639,42 @@ aliases: []
 # Main Entry Point
 # ============================================================================
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Ingest PDF paper and convert to Markdown"
     )
     parser.add_argument(
-        "pdf_source",
-        type=str,
-        help="Path to local PDF file OR URL to download"
+        "pdf_source", type=str, help="Path to local PDF file OR URL to download"
     )
     parser.add_argument(
         "--engine",
         type=str,
         choices=["docling", "nougat"],
         default="docling",
-        help="Conversion engine: docling (default, fast) or nougat (slow, better for math)"
+        help="Conversion engine: docling (default, fast) or nougat (slow, better for math)",
     )
     parser.add_argument(
-        "--output-dir", "-o",
+        "--output-dir",
+        "-o",
         type=str,
         default=None,
-        help="Output directory (default: current working directory)"
+        help="Output directory (default: current working directory)",
     )
     parser.add_argument(
         "--images-scale",
         type=float,
         default=4.0,
-        help="Image scale factor for extraction (1.0 ~= 72 DPI). Use >1 for higher resolution."
+        help="Image scale factor for extraction (1.0 ~= 72 DPI). Use >1 for higher resolution.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Allow overwriting when a folder with the same title exists"
+        help="Allow overwriting when a folder with the same title exists",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Handle URL or local path
     temp_pdf = None
     source_is_url = is_url(args.pdf_source)
@@ -662,7 +687,7 @@ def main():
             output_error(f"File not found: {pdf_path}")
         if not pdf_path.suffix.lower() == ".pdf":
             output_error(f"Not a PDF file: {pdf_path}")
-    
+
     try:
         # Convert based on engine
         engine = args.engine
@@ -678,28 +703,24 @@ def main():
                 formulas = extract_math_expressions(nougat_markdown)
                 if formulas:
                     markdown_content = replace_formula_placeholders(
-                        markdown_content,
-                        formulas
+                        markdown_content, formulas
                     )
                 else:
                     output_error(
                         "Failed to recover LaTeX formulas from nougat output",
-                        "Try running with --engine nougat for full math support"
+                        "Try running with --engine nougat for full math support",
                     )
         else:
             markdown_content, detected_title = convert_with_nougat(pdf_path)
             temp_assets = None
-        
+
         # Normalize math delimiters to $...$ / $$...$$
         markdown_content = apply_outside_code_blocks(
-            markdown_content,
-            normalize_math_delimiters
+            markdown_content, normalize_math_delimiters
         )
-        resolved_title = resolve_paper_title(
-            detected_title,
-            markdown_content,
-            pdf_path
-        )
+        # Wrap common inline math patterns (subscripts, greek letters, etc.)
+        markdown_content = wrap_inline_math(markdown_content)
+        resolved_title = resolve_paper_title(detected_title, markdown_content, pdf_path)
         if not resolved_title and not source_is_url:
             resolved_title = pdf_path.stem
         if not resolved_title:
@@ -712,26 +733,28 @@ def main():
             engine,
             resolved_title,
             args.output_dir,
-            args.force
+            args.force,
         )
-        
+
         # Move assets to final location (for docling)
         if engine == "docling" and temp_assets and temp_assets.exists():
             final_assets = Path(paths["paper_dir"]) / "assets"
             if any(temp_assets.iterdir()):
                 shutil.copytree(temp_assets, final_assets, dirs_exist_ok=True)
             shutil.rmtree(temp_assets.parent, ignore_errors=True)
-        
+
         # Output success JSON
-        output_json({
-            "status": "success",
-            "markdown_path": paths["markdown_path"],
-            "engine_used": engine,
-            "title": paths["title"],
-            "date": paths["date"],
-            "paper_dir": paths["paper_dir"],
-        })
-        
+        output_json(
+            {
+                "status": "success",
+                "markdown_path": paths["markdown_path"],
+                "engine_used": engine,
+                "title": paths["title"],
+                "date": paths["date"],
+                "paper_dir": paths["paper_dir"],
+            }
+        )
+
     finally:
         # Cleanup temp download
         if temp_pdf:
