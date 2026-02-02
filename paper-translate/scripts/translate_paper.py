@@ -40,27 +40,48 @@ from markdown_it import MarkdownIt
 # Configuration
 # ============================================================================
 
-# API Keys from environment or defaults
-TENSORBLOCK_API_KEY = os.environ.get(
-    "TENSORBLOCK_API_KEY",
-    "REDACTED"
-)
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
+def load_env_file(path: Path) -> None:
+    """Load environment variables from a .env file."""
+    if not path.exists():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if value and (value[0] == value[-1]) and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key:
+                os.environ.setdefault(key, value)
+    except Exception:
+        return
+
+
+load_env_file(ENV_FILE)
+
+# API Keys from environment
+TENSORBLOCK_API_KEY = os.environ.get("TENSORBLOCK_API_KEY", "")
 TENSORBLOCK_BASE_URL = os.environ.get(
     "TENSORBLOCK_BASE_URL",
     "https://api.forge.tensorblock.co/v1"
 )
 
-DEEPSEEK_API_KEY = os.environ.get(
-    "DEEPSEEK_API_KEY",
-    "REDACTED"
-)
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.environ.get(
     "DEEPSEEK_BASE_URL",
     "https://api.deepseek.com/v1"
 )
 
 # Translation settings
-MAX_CHARS_PER_CHUNK = 3000  # Approximate max chars per translation request
+DEFAULT_MAX_CHARS_PER_CHUNK = 3000  # DeepSeek default
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
 
@@ -81,6 +102,8 @@ class TranslationResult:
 class LLMBackend(ABC):
     """Abstract base class for LLM translation backends."""
 
+    max_chars_per_chunk: int = DEFAULT_MAX_CHARS_PER_CHUNK
+
     @abstractmethod
     def translate(self, text: str, target_lang: str) -> TranslationResult:
         """Translate text to target language."""
@@ -90,10 +113,11 @@ class LLMBackend(ABC):
 class OpenAICompatibleBackend(LLMBackend):
     """Backend for OpenAI-compatible APIs (TensorBlock, DeepSeek)."""
 
-    def __init__(self, api_key: str, base_url: str, model: str):
+    def __init__(self, api_key: str, base_url: str, model: str, max_chars_per_chunk: int):
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self.max_chars_per_chunk = max_chars_per_chunk
 
     def translate(self, text: str, target_lang: str) -> TranslationResult:
         """Translate text using OpenAI-compatible chat API."""
@@ -149,10 +173,16 @@ class TensorBlockBackend(OpenAICompatibleBackend):
     """TensorBlock Forge API backend."""
 
     def __init__(self):
+        if not TENSORBLOCK_API_KEY:
+            raise ValueError(
+                "TENSORBLOCK_API_KEY is not set. "
+                "Create paper-translate/.env or set the environment variable."
+            )
         super().__init__(
             api_key=TENSORBLOCK_API_KEY,
             base_url=TENSORBLOCK_BASE_URL,
-            model="deepseek-ai/DeepSeek-V3"  # Using DeepSeek-V3 on TensorBlock
+            model="tensorblock/gemini-3-flash-preview",  # Using DeepSeek-V3 on TensorBlock
+            max_chars_per_chunk=8000,
         )
 
 
@@ -160,10 +190,16 @@ class DeepSeekBackend(OpenAICompatibleBackend):
     """DeepSeek API backend."""
 
     def __init__(self):
+        if not DEEPSEEK_API_KEY:
+            raise ValueError(
+                "DEEPSEEK_API_KEY is not set. "
+                "Create paper-translate/.env or set the environment variable."
+            )
         super().__init__(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL,
-            model="deepseek-chat"
+            model="deepseek-chat",
+            max_chars_per_chunk=3000,
         )
 
 
@@ -213,6 +249,11 @@ class MarkdownTranslator:
         self.target_lang = target_lang
         self.placeholder_map: dict[str, str] = {}
         self.placeholder_counter = 0
+        self.max_chars_per_chunk = getattr(
+            backend,
+            "max_chars_per_chunk",
+            DEFAULT_MAX_CHARS_PER_CHUNK,
+        )
 
     def _create_placeholder(self, content: str, ptype: str) -> str:
         """Create a unique placeholder for protected content."""
@@ -259,6 +300,72 @@ class MarkdownTranslator:
         lines.insert(insert_idx, f"language: {self.target_lang}")
         return '\n'.join(lines) + '\n'
 
+    def _normalize_heading(self, heading_text: str) -> str:
+        text = heading_text.strip().lower()
+        text = re.sub(r'^\s*[\d\.\)\(]+', '', text)
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[:：\s]+$', '', text)
+        return text
+
+    def _is_references_heading(self, heading_text: str) -> bool:
+        normalized = self._normalize_heading(heading_text)
+        patterns = [
+            r'^references\b',
+            r'^reference\b',
+            r'^bibliography\b',
+            r'^works cited\b',
+            r'^literature cited\b',
+            r'^参考文献$',
+            r'^引用文献$',
+            r'^参考资料$',
+        ]
+        return any(re.match(pattern, normalized) for pattern in patterns)
+
+    def _strip_references_section(self, text: str) -> tuple[str, bool]:
+        """Remove REFERENCES/BIBLIOGRAPHY section before translation."""
+        md = MarkdownIt("commonmark")
+        tokens = md.parse(text)
+        lines = text.splitlines()
+        headings: list[tuple[int, int, str]] = []
+
+        for i, token in enumerate(tokens):
+            if token.type != "heading_open" or not token.map:
+                continue
+            level = int(token.tag[1]) if token.tag and token.tag.startswith("h") else 6
+            inline = tokens[i + 1] if i + 1 < len(tokens) else None
+            heading_text = inline.content if inline and inline.type == "inline" else ""
+            headings.append((token.map[0], level, heading_text))
+
+        if not headings:
+            return text, False
+
+        ranges: list[tuple[int, int]] = []
+        for idx, (start_line, level, heading_text) in enumerate(headings):
+            if not self._is_references_heading(heading_text):
+                continue
+            end_line = len(lines)
+            for next_start, next_level, _ in headings[idx + 1:]:
+                if next_level <= level:
+                    end_line = next_start
+                    break
+            if start_line < end_line:
+                ranges.append((start_line, end_line))
+
+        if not ranges:
+            return text, False
+
+        for start_line, end_line in sorted(ranges, reverse=True):
+            start_line = max(0, start_line)
+            end_line = min(len(lines), end_line)
+            if start_line >= end_line:
+                continue
+            del lines[start_line:end_line]
+
+        result = "\n".join(lines)
+        if text.endswith("\n"):
+            result += "\n"
+        return result, True
+
     def _split_into_chunks(self, text: str) -> list[str]:
         """Split text into chunks for translation."""
         # Split by paragraphs (double newline)
@@ -272,7 +379,7 @@ class MarkdownTranslator:
             para_length = len(para)
 
             # If adding this paragraph exceeds limit, save current chunk
-            if current_length + para_length > MAX_CHARS_PER_CHUNK and current_chunk:
+            if current_length + para_length > self.max_chars_per_chunk and current_chunk:
                 chunks.append('\n\n'.join(current_chunk))
                 current_chunk = []
                 current_length = 0
@@ -298,6 +405,11 @@ class MarkdownTranslator:
         # Reset placeholder state
         self.placeholder_map = {}
         self.placeholder_counter = 0
+
+        # Remove references section before translation
+        body, removed_refs = self._strip_references_section(body)
+        if removed_refs:
+            print("References section removed before translation.", file=sys.stderr)
 
         # Protect content that shouldn't be translated
         protected_body = self._protect_content(body)
@@ -369,8 +481,8 @@ def main():
     parser.add_argument(
         "--backend",
         choices=["deepseek", "tensorblock"],
-        default="deepseek",
-        help="LLM backend to use (default: deepseek)"
+        default="tensorblock",
+        help="LLM backend to use (default: tensorblock)"
     )
     parser.add_argument(
         "--target-lang",
