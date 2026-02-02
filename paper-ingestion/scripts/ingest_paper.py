@@ -37,6 +37,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -865,6 +866,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Ingest PDF paper and convert to Markdown"
     )
+    start_time = time.time()
     parser.add_argument(
         "pdf_source", type=str, help="Path to local PDF file OR URL to download"
     )
@@ -896,20 +898,20 @@ def main():
 
     args = parser.parse_args()
 
-    # Handle URL or local path
-    temp_pdf = None
-    source_is_url = is_url(args.pdf_source)
-    if source_is_url:
-        pdf_path = download_pdf(args.pdf_source)
-        temp_pdf = pdf_path.parent  # Remember temp dir for cleanup
-    else:
-        pdf_path = Path(args.pdf_source).resolve()
-        if not pdf_path.exists():
-            output_error(f"File not found: {pdf_path}")
-        if not pdf_path.suffix.lower() == ".pdf":
-            output_error(f"Not a PDF file: {pdf_path}")
-
     try:
+        # Handle URL or local path
+        temp_pdf = None
+        source_is_url = is_url(args.pdf_source)
+        if source_is_url:
+            pdf_path = download_pdf(args.pdf_source)
+            temp_pdf = pdf_path.parent  # Remember temp dir for cleanup
+        else:
+            pdf_path = Path(args.pdf_source).resolve()
+            if not pdf_path.exists():
+                output_error(f"File not found: {pdf_path}")
+            if not pdf_path.suffix.lower() == ".pdf":
+                output_error(f"Not a PDF file: {pdf_path}")
+
         # Convert based on engine
         engine = args.engine
         temp_assets = Path(tempfile.mkdtemp()) / "assets"
@@ -969,6 +971,9 @@ def main():
         # Cleanup temp download
         if temp_pdf:
             shutil.rmtree(temp_pdf, ignore_errors=True)
+
+        elapsed_time = time.time() - start_time
+        print(f"Total execution time: {elapsed_time:.2f} seconds", file=sys.stderr)
 
 
 if __name__ == "__main__":
