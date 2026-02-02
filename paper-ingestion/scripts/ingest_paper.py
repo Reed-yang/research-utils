@@ -311,8 +311,23 @@ def get_all_free_gpus(
 ) -> list[str]:
     """
     Get indices of all free GPUs, sorted by memory usage (lowest first).
+
+    Priority:
+    1. If CUDA_VISIBLE_DEVICES is set, use those GPU indices directly
+    2. Otherwise, auto-detect free GPUs via nvidia-smi
+
     Returns empty list if no GPU is free or nvidia-smi fails.
     """
+    # Priority 1: Respect CUDA_VISIBLE_DEVICES if already set by user/container
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible is not None and cuda_visible.strip():
+        # User explicitly set GPU indices - use them as-is
+        # These are already the logical indices visible to this process
+        indices = [idx.strip() for idx in cuda_visible.split(",") if idx.strip()]
+        print(f"Using CUDA_VISIBLE_DEVICES: {indices}", file=sys.stderr)
+        return indices
+
+    # Priority 2: Auto-detect free GPUs via nvidia-smi
     try:
         result = subprocess.run(
             [
