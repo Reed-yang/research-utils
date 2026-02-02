@@ -4,3 +4,9 @@ todo.md
 .qodo
 .agent
 .cursor
+
+
+benchmark.*
+*.log
+*.resolved
+*.out
