@@ -29,6 +29,7 @@ Output:
 import argparse
 import csv
 import io
+import math
 import os
 import subprocess
 import json
@@ -36,6 +37,7 @@ import re
 import shutil
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -303,13 +305,14 @@ def check_duplicate(sanitized_title: str, output_root: Path) -> bool:
 # ============================================================================
 
 
-def get_best_free_gpu(max_memory_mb=2000, max_util_percent=10) -> str | None:
+def get_all_free_gpus(
+    max_memory_mb: int = 2000, max_util_percent: int = 10
+) -> list[str]:
     """
-    Get index of the best free GPU (lowest memory usage).
-    Returns None if no GPU is free or nvidia-smi fails.
+    Get indices of all free GPUs, sorted by memory usage (lowest first).
+    Returns empty list if no GPU is free or nvidia-smi fails.
     """
     try:
-        # Check nvidia-smi
         result = subprocess.run(
             [
                 "nvidia-smi",
@@ -320,7 +323,7 @@ def get_best_free_gpu(max_memory_mb=2000, max_util_percent=10) -> str | None:
             text=True,
         )
         if result.returncode != 0:
-            return None
+            return []
 
         reader = csv.reader(io.StringIO(result.stdout.strip()))
         free_gpus = []
@@ -332,17 +335,188 @@ def get_best_free_gpu(max_memory_mb=2000, max_util_percent=10) -> str | None:
             except ValueError:
                 continue
 
-        if not free_gpus:
-            return None
-
         # Sort by memory usage (ascending)
         free_gpus.sort(key=lambda x: x[1])
-        return str(free_gpus[0][0])
+        return [str(gpu[0]) for gpu in free_gpus]
 
     except FileNotFoundError:
-        return None  # nvidia-smi not found
+        return []  # nvidia-smi not found
     except Exception:
-        return None
+        return []
+
+
+def get_pdf_page_count(pdf_path: Path) -> int:
+    """Get total page count of a PDF using pypdf."""
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(pdf_path))
+        return len(reader.pages)
+    except Exception:
+        return 0
+
+
+def split_pdf_to_chunks(
+    pdf_path: Path, num_chunks: int, tmpdir: Path
+) -> list[tuple[Path, int, int]]:
+    """
+    Split PDF into chunks for parallel processing.
+
+    Returns list of (chunk_pdf_path, start_page, end_page) tuples.
+    Pages are 0-indexed.
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(pdf_path))
+    total_pages = len(reader.pages)
+
+    if total_pages == 0:
+        return []
+
+    # Limit chunks to page count
+    num_chunks = min(num_chunks, total_pages)
+    pages_per_chunk = math.ceil(total_pages / num_chunks)
+
+    chunks = []
+    for i in range(num_chunks):
+        start_page = i * pages_per_chunk
+        end_page = min((i + 1) * pages_per_chunk - 1, total_pages - 1)
+
+        if start_page > end_page:
+            break
+
+        # Create chunk PDF
+        writer = PdfWriter()
+        for page_num in range(start_page, end_page + 1):
+            writer.add_page(reader.pages[page_num])
+
+        chunk_path = tmpdir / f"chunk_{i:02d}.pdf"
+        with open(chunk_path, "wb") as f:
+            writer.write(f)
+
+        chunks.append((chunk_path, start_page, end_page))
+
+    return chunks
+
+
+def run_mineru_on_chunk(
+    chunk_pdf: Path,
+    gpu_idx: str,
+    output_dir: Path,
+    chunk_idx: int,
+) -> tuple[int, str, Path | None]:
+    """
+    Run MinerU on a single PDF chunk using specified GPU.
+
+    Returns (chunk_idx, markdown_content, images_dir or None).
+    """
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = gpu_idx
+    env["MINERU_HYBRID_BATCH_RATIO"] = "16"
+
+    try:
+        result = subprocess.run(
+            [
+                "mineru",
+                "-p",
+                str(chunk_pdf),
+                "-o",
+                str(output_dir),
+                "-b",
+                "hybrid-auto-engine",
+                "-l",
+                "en",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 min timeout per chunk
+        )
+
+        if result.returncode != 0:
+            return (chunk_idx, "", None)
+
+        # Find generated markdown
+        md_files = list(output_dir.rglob("*.md"))
+        if not md_files:
+            return (chunk_idx, "", None)
+
+        md_file = md_files[0]
+        markdown_content = md_file.read_text(encoding="utf-8")
+
+        # Find images directory
+        images_dir = md_file.parent / "images"
+        if not images_dir.exists():
+            images_dir = None
+
+        return (chunk_idx, markdown_content, images_dir)
+
+    except Exception:
+        return (chunk_idx, "", None)
+
+
+def merge_chunk_results(
+    chunk_results: list[tuple[int, str, Path | None]],
+    assets_dir: Path,
+) -> tuple[str, int]:
+    """
+    Merge markdown from multiple chunks and renumber images sequentially.
+
+    Returns (merged_markdown, total_image_count).
+    """
+    # Sort by chunk index
+    chunk_results.sort(key=lambda x: x[0])
+
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    merged_parts = []
+    global_image_counter = 0
+
+    for chunk_idx, markdown_content, images_dir in chunk_results:
+        if not markdown_content:
+            continue
+
+        # Build image mapping for this chunk
+        image_map = {}  # old_ref -> new_ref
+
+        if images_dir and images_dir.exists():
+            for img_file in sorted(images_dir.iterdir()):
+                if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    global_image_counter += 1
+                    new_name = f"image_{global_image_counter:03d}{img_file.suffix}"
+                    shutil.copy2(img_file, assets_dir / new_name)
+
+                    # Map various possible references
+                    old_ref = f"images/{img_file.name}"
+                    image_map[old_ref] = f"./assets/{new_name}"
+                    image_map[img_file.name] = f"./assets/{new_name}"
+
+        # Rewrite image paths in this chunk's markdown
+        def replace_img_path(match):
+            alt_text = match.group(1)
+            old_path = match.group(2)
+
+            if old_path in image_map:
+                return f"![{alt_text}]({image_map[old_path]})"
+
+            # Try filename only
+            filename = Path(old_path).name
+            if filename in image_map:
+                return f"![{alt_text}]({image_map[filename]})"
+
+            return match.group(0)
+
+        updated_content = re.sub(
+            r"!\[([^\]]*)\]\(([^)]+)\)",
+            replace_img_path,
+            markdown_content,
+        )
+
+        merged_parts.append(updated_content)
+
+    # Join with page breaks
+    merged_markdown = "\n\n---\n\n".join(merged_parts)
+
+    return merged_markdown, global_image_counter
 
 
 def convert_with_docling(
@@ -419,105 +593,166 @@ def convert_with_mineru(
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using MinerU (hybrid-auto-engine for best accuracy).
-    Uses CLI subprocess to avoid import conflicts with other backends.
 
-    Automatically selects the best available GPU.
+    Automatically detects all free GPUs and uses parallel page-chunking
+    when multiple GPUs are available.
 
     Returns (markdown_content, detected_title).
     """
-    import subprocess
+    MAX_WORKERS = 4  # Cap parallel workers to avoid OOM
 
-    # Create temporary directory for MinerU output
-    tmpdir = tempfile.mkdtemp()
+    # Detect all free GPUs
+    free_gpus = get_all_free_gpus()
+    page_count = get_pdf_page_count(pdf_path)
 
-    # Detect best free GPU
-    gpu_idx = get_best_free_gpu()
-    env = os.environ.copy()
-
-    if gpu_idx:
-        env["CUDA_VISIBLE_DEVICES"] = gpu_idx
-        print(f"MinerU using GPU: {gpu_idx}", file=sys.stderr)
-    else:
+    if not free_gpus:
         print("MinerU: No free GPU found, using default/CPU", file=sys.stderr)
+        free_gpus = [""]  # Empty string = use default CUDA device
+
+    # Determine optimal worker count
+    num_workers = min(len(free_gpus), page_count, MAX_WORKERS)
+    num_workers = max(1, num_workers)  # At least 1 worker
+
+    # Use selected GPUs (take first N)
+    selected_gpus = free_gpus[:num_workers]
+
+    # Report configuration
+    if num_workers > 1:
+        print(
+            f"MinerU using {num_workers} GPUs: {selected_gpus} "
+            f"({num_workers} workers, batch_ratio=16)",
+            file=sys.stderr,
+        )
+    else:
+        gpu_str = selected_gpus[0] if selected_gpus[0] else "default"
+        print(f"MinerU using GPU: {gpu_str} (batch_ratio=16)", file=sys.stderr)
+
+    # Create temporary directory
+    tmpdir = Path(tempfile.mkdtemp())
 
     try:
-        result = subprocess.run(
-            [
-                "mineru",
-                "-p",
-                str(pdf_path),
-                "-o",
-                tmpdir,
-                "-b",
-                "hybrid-auto-engine",
-                "-l",
-                "en",
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
+        # === SINGLE WORKER PATH ===
+        if num_workers == 1:
+            env = os.environ.copy()
+            env["MINERU_HYBRID_BATCH_RATIO"] = "16"
+            if selected_gpus[0]:
+                env["CUDA_VISIBLE_DEVICES"] = selected_gpus[0]
 
-        if result.returncode != 0:
-            if "Check MinerU installation" in result.stderr:
-                pass
-            output_error(
-                f"MinerU conversion failed: {result.stderr[:500]}",
-                "Check MinerU installation: uv pip install -U 'mineru[all]'",
+            result = subprocess.run(
+                [
+                    "mineru",
+                    "-p",
+                    str(pdf_path),
+                    "-o",
+                    str(tmpdir),
+                    "-b",
+                    "hybrid-auto-engine",
+                    "-l",
+                    "en",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=600,
             )
 
-        # Find generated markdown file
-        # MinerU output structure: {output}/{pdf_stem}/hybrid_auto/{pdf_stem}.md
-        output_path = Path(tmpdir)
-        md_files = list(output_path.rglob("*.md"))
-        if not md_files:
-            output_error("MinerU produced no markdown output")
+            if result.returncode != 0:
+                output_error(
+                    f"MinerU conversion failed: {result.stderr[:500]}",
+                    "Check MinerU installation: uv pip install -U 'mineru[all]'",
+                )
 
-        # Find the main markdown file (prefer one matching PDF stem)
-        pdf_stem = pdf_path.stem
-        md_file = next((f for f in md_files if f.stem == pdf_stem), md_files[0])
-        markdown_content = md_file.read_text(encoding="utf-8")
+            # Find generated markdown
+            md_files = list(tmpdir.rglob("*.md"))
+            if not md_files:
+                output_error("MinerU produced no markdown output")
 
-        # Copy images to assets directory and build name mapping
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        image_map = {}  # old_name -> new_name
-        image_counter = 0
+            pdf_stem = pdf_path.stem
+            md_file = next((f for f in md_files if f.stem == pdf_stem), md_files[0])
+            markdown_content = md_file.read_text(encoding="utf-8")
 
-        # Find images directory relative to markdown file
-        images_dir = md_file.parent / "images"
-        if images_dir.exists():
-            for img_file in sorted(images_dir.iterdir()):
-                if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
-                    image_counter += 1
-                    new_name = f"image_{image_counter:03d}{img_file.suffix}"
-                    shutil.copy2(img_file, assets_dir / new_name)
-                    # Map: images/hash.jpg -> ./assets/image_001.jpg
-                    old_ref = f"images/{img_file.name}"
-                    image_map[old_ref] = f"./assets/{new_name}"
+            # Copy images to assets directory
+            assets_dir.mkdir(parents=True, exist_ok=True)
+            image_map = {}
+            image_counter = 0
 
-        # Rewrite image paths in markdown
-        def replace_img_path(match):
-            alt_text = match.group(1)
-            old_path = match.group(2)
-            # Check if this path is in our mapping
-            if old_path in image_map:
-                return f"![{alt_text}]({image_map[old_path]})"
-            # Try with just the filename
-            for old_ref, new_ref in image_map.items():
-                if old_ref.endswith(Path(old_path).name):
-                    return f"![{alt_text}]({new_ref})"
-            return match.group(0)
+            images_dir = md_file.parent / "images"
+            if images_dir.exists():
+                for img_file in sorted(images_dir.iterdir()):
+                    if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                        image_counter += 1
+                        new_name = f"image_{image_counter:03d}{img_file.suffix}"
+                        shutil.copy2(img_file, assets_dir / new_name)
+                        old_ref = f"images/{img_file.name}"
+                        image_map[old_ref] = f"./assets/{new_name}"
 
-        markdown_content = re.sub(
-            r"!\[([^\]]*)\]\(([^)]+)\)",
-            replace_img_path,
-            markdown_content,
+            # Rewrite image paths
+            def replace_img_path(match):
+                alt_text = match.group(1)
+                old_path = match.group(2)
+                if old_path in image_map:
+                    return f"![{alt_text}]({image_map[old_path]})"
+                for old_ref, new_ref in image_map.items():
+                    if old_ref.endswith(Path(old_path).name):
+                        return f"![{alt_text}]({new_ref})"
+                return match.group(0)
+
+            markdown_content = re.sub(
+                r"!\[([^\]]*)\]\(([^)]+)\)",
+                replace_img_path,
+                markdown_content,
+            )
+
+            detected_title = extract_title_from_markdown(markdown_content)
+            return markdown_content, detected_title
+
+        # === MULTI-WORKER PARALLEL PATH ===
+        chunks_dir = tmpdir / "chunks"
+        chunks_dir.mkdir(exist_ok=True)
+
+        # Split PDF into chunks
+        chunks = split_pdf_to_chunks(pdf_path, num_workers, chunks_dir)
+
+        if not chunks:
+            output_error("Failed to split PDF into chunks")
+
+        print(
+            f"  Split into {len(chunks)} chunks for parallel processing",
+            file=sys.stderr,
         )
 
-        # Extract title
-        detected_title = extract_title_from_markdown(markdown_content)
+        # Process chunks in parallel
+        chunk_results = []
 
+        def process_chunk(args):
+            chunk_idx, chunk_info, gpu_idx = args
+            chunk_pdf, start_pg, end_pg = chunk_info
+            output_dir = tmpdir / f"output_{chunk_idx:02d}"
+            output_dir.mkdir(exist_ok=True)
+            return run_mineru_on_chunk(chunk_pdf, gpu_idx, output_dir, chunk_idx)
+
+        # Prepare work items (round-robin GPU assignment if more chunks than GPUs)
+        work_items = []
+        for i, chunk in enumerate(chunks):
+            gpu_idx = selected_gpus[i % len(selected_gpus)]
+            work_items.append((i, chunk, gpu_idx))
+
+        # Run parallel
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(process_chunk, item) for item in work_items]
+            for future in as_completed(futures):
+                result = future.result()
+                chunk_results.append(result)
+
+        # Merge results
+        markdown_content, total_images = merge_chunk_results(chunk_results, assets_dir)
+
+        if not markdown_content:
+            output_error("All MinerU chunk processes failed")
+
+        print(f"  Merged {len(chunks)} chunks, {total_images} images", file=sys.stderr)
+
+        detected_title = extract_title_from_markdown(markdown_content)
         return markdown_content, detected_title
 
     except subprocess.TimeoutExpired:
