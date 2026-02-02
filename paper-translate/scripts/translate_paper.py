@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +85,7 @@ DEEPSEEK_BASE_URL = os.environ.get(
 DEFAULT_MAX_CHARS_PER_CHUNK = 3000  # DeepSeek default
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+MAX_WORKERS = 10
 
 
 # ============================================================================
@@ -105,7 +107,7 @@ class LLMBackend(ABC):
     max_chars_per_chunk: int = DEFAULT_MAX_CHARS_PER_CHUNK
 
     @abstractmethod
-    def translate(self, text: str, target_lang: str) -> TranslationResult:
+    def translate(self, text: str, target_lang: str, context: str | None = None) -> TranslationResult:
         """Translate text to target language."""
         pass
 
@@ -119,7 +121,7 @@ class OpenAICompatibleBackend(LLMBackend):
         self.model = model
         self.max_chars_per_chunk = max_chars_per_chunk
 
-    def translate(self, text: str, target_lang: str) -> TranslationResult:
+    def translate(self, text: str, target_lang: str, context: str | None = None) -> TranslationResult:
         """Translate text using OpenAI-compatible chat API."""
         from openai import OpenAI
 
@@ -144,14 +146,20 @@ CRITICAL RULES:
 4. Use accurate academic/technical terminology
 5. Output ONLY the translated text, no explanations"""
 
+        messages = []
+        if context:
+            messages.append({
+                "role": "system",
+                "content": f"Paper context (for reference only):\n{context}"
+            })
+        messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": text})
+
         for attempt in range(MAX_RETRIES):
             try:
                 response = client.chat.completions.create(
                     model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": text}
-                    ],
+                    messages=messages,
                     temperature=0.3,
                     max_tokens=4096,
                 )
@@ -307,6 +315,16 @@ class MarkdownTranslator:
         text = re.sub(r'[:：\s]+$', '', text)
         return text
 
+    def _is_abstract_heading(self, heading_text: str) -> bool:
+        normalized = self._normalize_heading(heading_text)
+        patterns = [
+            r'^abstract\b',
+            r'^summary\b',
+            r'^概要$',
+            r'^摘要$',
+        ]
+        return any(re.match(pattern, normalized) for pattern in patterns)
+
     def _is_references_heading(self, heading_text: str) -> bool:
         normalized = self._normalize_heading(heading_text)
         patterns = [
@@ -321,30 +339,35 @@ class MarkdownTranslator:
         ]
         return any(re.match(pattern, normalized) for pattern in patterns)
 
-    def _strip_references_section(self, text: str) -> tuple[str, bool]:
-        """Remove REFERENCES/BIBLIOGRAPHY section before translation."""
+    def _collect_headings(self, text: str) -> list[tuple[int, int, int, str]]:
+        """Collect markdown headings with line ranges."""
         md = MarkdownIt("commonmark")
         tokens = md.parse(text)
-        lines = text.splitlines()
-        headings: list[tuple[int, int, str]] = []
-
+        headings: list[tuple[int, int, int, str]] = []
         for i, token in enumerate(tokens):
             if token.type != "heading_open" or not token.map:
                 continue
             level = int(token.tag[1]) if token.tag and token.tag.startswith("h") else 6
             inline = tokens[i + 1] if i + 1 < len(tokens) else None
             heading_text = inline.content if inline and inline.type == "inline" else ""
-            headings.append((token.map[0], level, heading_text))
+            start_line, end_line = token.map
+            headings.append((start_line, end_line, level, heading_text))
+        return headings
+
+    def _strip_references_section(self, text: str) -> tuple[str, bool]:
+        """Remove REFERENCES/BIBLIOGRAPHY section before translation."""
+        lines = text.splitlines()
+        headings = self._collect_headings(text)
 
         if not headings:
             return text, False
 
         ranges: list[tuple[int, int]] = []
-        for idx, (start_line, level, heading_text) in enumerate(headings):
+        for idx, (start_line, _end_line, level, heading_text) in enumerate(headings):
             if not self._is_references_heading(heading_text):
                 continue
             end_line = len(lines)
-            for next_start, next_level, _ in headings[idx + 1:]:
+            for next_start, _next_end, next_level, _ in headings[idx + 1:]:
                 if next_level <= level:
                     end_line = next_start
                     break
@@ -365,6 +388,53 @@ class MarkdownTranslator:
         if text.endswith("\n"):
             result += "\n"
         return result, True
+
+    def _extract_title(self, frontmatter: str | None, body: str) -> str | None:
+        if frontmatter:
+            for line in frontmatter.splitlines():
+                match = re.match(r'^\s*title\s*:\s*(.+)\s*$', line, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1).strip().strip('"').strip("'")
+
+        headings = self._collect_headings(body)
+        for _start_line, _end_line, _level, heading_text in headings:
+            if not heading_text:
+                continue
+            if self._is_abstract_heading(heading_text) or self._is_references_heading(heading_text):
+                continue
+            return heading_text.strip()
+        return None
+
+    def _extract_abstract(self, body: str) -> str | None:
+        lines = body.splitlines()
+        headings = self._collect_headings(body)
+        if not headings:
+            return None
+
+        for idx, (start_line, end_line, level, heading_text) in enumerate(headings):
+            if not self._is_abstract_heading(heading_text):
+                continue
+            content_start = end_line
+            content_end = len(lines)
+            for next_start, _next_end, next_level, _ in headings[idx + 1:]:
+                if next_level <= level:
+                    content_end = next_start
+                    break
+            abstract_lines = lines[content_start:content_end]
+            abstract_text = "\n".join(abstract_lines).strip()
+            if abstract_text:
+                return abstract_text
+        return None
+
+    def _build_context(self, frontmatter: str | None, body: str) -> str | None:
+        title = self._extract_title(frontmatter, body)
+        abstract = self._extract_abstract(body)
+
+        if abstract and title:
+            return f"Title: {title}\nAbstract:\n{abstract}"
+        if title:
+            return f"Title: {title}"
+        return None
 
     def _split_into_chunks(self, text: str) -> list[str]:
         """Split text into chunks for translation."""
@@ -411,6 +481,10 @@ class MarkdownTranslator:
         if removed_refs:
             print("References section removed before translation.", file=sys.stderr)
 
+        context = self._build_context(frontmatter, body)
+        if context:
+            print("Context extracted for chunk translation.", file=sys.stderr)
+
         # Protect content that shouldn't be translated
         protected_body = self._protect_content(body)
 
@@ -419,26 +493,41 @@ class MarkdownTranslator:
 
         print(f"Translating {len(chunks)} chunks...", file=sys.stderr)
 
-        translated_chunks = []
-        for i, chunk in enumerate(chunks):
-            print(f"  Chunk {i+1}/{len(chunks)}...", file=sys.stderr)
+        translated_chunks: list[str | None] = [None] * len(chunks)
+        futures: dict = {}
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for i, chunk in enumerate(chunks):
+                print(f"  Chunk {i+1}/{len(chunks)}...", file=sys.stderr)
 
-            # Skip chunks that are mostly placeholders
-            non_placeholder_text = re.sub(r'⟦[^⟧]+⟧', '', chunk)
-            if len(non_placeholder_text.strip()) < 20:
-                # Mostly protected content, keep as-is
-                translated_chunks.append(chunk)
-                continue
+                # Skip chunks that are mostly placeholders
+                non_placeholder_text = re.sub(r'⟦[^⟧]+⟧', '', chunk)
+                if len(non_placeholder_text.strip()) < 20:
+                    # Mostly protected content, keep as-is
+                    translated_chunks[i] = chunk
+                    continue
 
-            result = self.backend.translate(chunk, self.target_lang)
-            if not result.success:
-                return "", False, result.error
+                future = executor.submit(
+                    self.backend.translate,
+                    chunk,
+                    self.target_lang,
+                    context,
+                )
+                futures[future] = i
 
-            translated_chunks.append(result.text)
-            time.sleep(0.5)  # Rate limiting
+            for future in as_completed(futures):
+                index = futures[future]
+                result = future.result()
+                if not result.success:
+                    for pending in futures:
+                        pending.cancel()
+                    return "", False, result.error
+                translated_chunks[index] = result.text
+
+        if any(chunk is None for chunk in translated_chunks):
+            return "", False, "Translation failed: missing chunk results."
 
         # Join translated chunks
-        translated_body = '\n\n'.join(translated_chunks)
+        translated_body = '\n\n'.join(chunk for chunk in translated_chunks if chunk is not None)
 
         # Restore protected content
         translated_body = self._restore_content(translated_body)
