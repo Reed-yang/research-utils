@@ -428,7 +428,7 @@ def run_mineru_on_chunk(
     """
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = gpu_idx
-    env["MINERU_HYBRID_BATCH_RATIO"] = "16"
+    env["MINERU_HYBRID_BATCH_RATIO"] = "8"
 
     try:
         result = subprocess.run(
@@ -602,6 +602,152 @@ def convert_with_docling(
 # MinerU Backend (High-Quality GPU-Accelerated)
 # ============================================================================
 
+# Default mineru-api server configuration
+MINERU_API_HOST = os.environ.get("MINERU_API_HOST", "127.0.0.1")
+MINERU_API_PORT = int(os.environ.get("MINERU_API_PORT", "8000"))
+
+
+def check_mineru_api_server(host: str = None, port: int = None) -> bool:
+    """
+    Check if mineru-api server is running and healthy.
+
+    Returns True if server is available.
+    """
+    import requests
+
+    host = host or MINERU_API_HOST
+    port = port or MINERU_API_PORT
+
+    try:
+        response = requests.get(f"http://{host}:{port}/docs", timeout=2)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def convert_via_mineru_api(
+    pdf_path: Path,
+    assets_dir: Path,
+    host: str = None,
+    port: int = None,
+) -> tuple[str, str | None]:
+    """
+    Convert PDF via mineru-api REST server (persistent model, no reload overhead).
+
+    Requires mineru-api server to be running:
+        CUDA_VISIBLE_DEVICES=0 mineru-api --host 127.0.0.1 --port 8000
+
+    Returns (markdown_content, detected_title).
+    """
+    import requests
+
+    host = host or MINERU_API_HOST
+    port = port or MINERU_API_PORT
+
+    try:
+        # Upload PDF and convert via API
+        # Endpoint is /file_parse per MinerU's fast_api.py
+        with open(pdf_path, "rb") as f:
+            response = requests.post(
+                f"http://{host}:{port}/file_parse",
+                files={"files": (pdf_path.name, f, "application/pdf")},
+                data={
+                    "backend": "hybrid-auto-engine",
+                    "parse_method": "auto",
+                    "lang_list": "en",
+                    "return_md": "true",
+                    "return_images": "true",
+                    "formula_enable": "true",
+                    "table_enable": "true",
+                },
+                timeout=600,  # 10 min timeout for large PDFs
+            )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"API error: {response.status_code} - {response.text[:200]}"
+            )
+
+        result = response.json()
+
+        # API response format:
+        # {"backend": "...", "version": "...", "results": {
+        #   "pdf_stem": {"md_content": "...", "images": {"img.jpg": "data:image/jpeg;base64,..."}}
+        # }}
+        results = result.get("results", {})
+        if not results:
+            raise RuntimeError("API returned empty results")
+
+        # Get first (only) result since we send one file
+        pdf_stem = pdf_path.stem
+        pdf_result = results.get(pdf_stem, {})
+        if not pdf_result:
+            # Try to get first available result
+            pdf_result = next(iter(results.values()), {})
+
+        # Extract markdown content
+        markdown_content = pdf_result.get("md_content", "")
+        if not markdown_content:
+            raise RuntimeError("API returned no markdown content")
+
+        # Handle images from API response
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        image_counter = 0
+        image_map = {}
+
+        # API returns images as base64 data URIs: {"img.jpg": "data:image/jpeg;base64,..."}
+        images_dict = pdf_result.get("images", {})
+        for img_filename, img_data_uri in images_dict.items():
+            image_counter += 1
+            # Determine extension from filename or default to jpg
+            ext = Path(img_filename).suffix or ".jpg"
+            img_name = f"image_{image_counter:03d}{ext}"
+            img_path = assets_dir / img_name
+
+            # Parse data URI: data:image/jpeg;base64,/9j/4AAQ...
+            if isinstance(img_data_uri, str) and ";base64," in img_data_uri:
+                import base64
+
+                base64_data = img_data_uri.split(";base64,", 1)[1]
+                img_bytes = base64.b64decode(base64_data)
+                with open(img_path, "wb") as f:
+                    f.write(img_bytes)
+                # Map original reference to new path
+                image_map[f"images/{img_filename}"] = f"./assets/{img_name}"
+                image_map[img_filename] = f"./assets/{img_name}"
+
+        # Rewrite image paths in markdown
+        def replace_img_path(match):
+            alt_text = match.group(1)
+            old_path = match.group(2)
+            if old_path in image_map:
+                return f"![{alt_text}]({image_map[old_path]})"
+            for old_ref, new_ref in image_map.items():
+                if old_ref in old_path or old_path in old_ref:
+                    return f"![{alt_text}]({new_ref})"
+            return match.group(0)
+
+        markdown_content = re.sub(
+            r"!\[([^\]]*)\]\(([^)]+)\)",
+            replace_img_path,
+            markdown_content,
+        )
+
+        detected_title = extract_title_from_markdown(markdown_content)
+        return markdown_content, detected_title
+
+    except Exception as e:
+        raise RuntimeError(f"mineru-api conversion failed: {e}")
+
+
+# Global to track conversion metadata for logging
+_conversion_metadata = {}
+
+
+def get_conversion_metadata() -> dict:
+    """Get metadata about the last conversion for logging."""
+    return _conversion_metadata.copy()
+
 
 def convert_with_mineru(
     pdf_path: Path,
@@ -610,11 +756,36 @@ def convert_with_mineru(
     """
     Convert PDF to Markdown using MinerU (hybrid-auto-engine for best accuracy).
 
+    Strategy:
+    1. Try mineru-api server first (persistent model, no reload overhead)
+    2. Fall back to subprocess CLI if server not available
+
     Automatically detects all free GPUs and uses parallel page-chunking
     when multiple GPUs are available.
 
     Returns (markdown_content, detected_title).
     """
+    global _conversion_metadata
+    page_count = get_pdf_page_count(pdf_path)
+    # === PRIORITY 1: Try mineru-api server (persistent model) ===
+    if check_mineru_api_server():
+        print(
+            f"MinerU: Using API server at {MINERU_API_HOST}:{MINERU_API_PORT} (persistent model)",
+            file=sys.stderr,
+        )
+        try:
+            _conversion_metadata = {
+                "backend": "mineru",
+                "mode": "api",
+                "api_host": MINERU_API_HOST,
+                "api_port": MINERU_API_PORT,
+                "page_count": page_count,
+            }
+            return convert_via_mineru_api(pdf_path, assets_dir)
+        except Exception as e:
+            print(f"MinerU API failed: {e}, falling back to CLI", file=sys.stderr)
+
+    # === PRIORITY 2: Fall back to subprocess CLI ===
     MAX_WORKERS = 4  # Cap parallel workers to avoid OOM
 
     # Detect all free GPUs
@@ -633,15 +804,28 @@ def convert_with_mineru(
     selected_gpus = free_gpus[:num_workers]
 
     # Report configuration
+    batch_ratio = 8
     if num_workers > 1:
         print(
             f"MinerU using {num_workers} GPUs: {selected_gpus} "
-            f"({num_workers} workers, batch_ratio=16)",
+            f"({num_workers} workers, batch_ratio={batch_ratio})",
             file=sys.stderr,
         )
     else:
         gpu_str = selected_gpus[0] if selected_gpus[0] else "default"
-        print(f"MinerU using GPU: {gpu_str} (batch_ratio=16)", file=sys.stderr)
+        print(
+            f"MinerU using GPU: {gpu_str} (batch_ratio={batch_ratio})", file=sys.stderr
+        )
+
+    # Store metadata for logging
+    _conversion_metadata = {
+        "backend": "mineru",
+        "mode": "cli",
+        "gpus": ",".join(selected_gpus) if selected_gpus[0] else "default",
+        "num_workers": num_workers,
+        "batch_ratio": batch_ratio,
+        "page_count": page_count,
+    }
 
     # Create temporary directory
     tmpdir = Path(tempfile.mkdtemp())
@@ -650,7 +834,7 @@ def convert_with_mineru(
         # === SINGLE WORKER PATH ===
         if num_workers == 1:
             env = os.environ.copy()
-            env["MINERU_HYBRID_BATCH_RATIO"] = "16"
+            env["MINERU_HYBRID_BATCH_RATIO"] = "8"
             if selected_gpus[0]:
                 env["CUDA_VISIBLE_DEVICES"] = selected_gpus[0]
 
@@ -988,7 +1172,42 @@ def main():
             shutil.rmtree(temp_pdf, ignore_errors=True)
 
         elapsed_time = time.time() - start_time
-        print(f"Total execution time: {elapsed_time:.2f} seconds", file=sys.stderr)
+
+        # Enhanced logging with conversion details
+        print("\n" + "=" * 50, file=sys.stderr)
+        print("Conversion Summary", file=sys.stderr)
+        print("=" * 50, file=sys.stderr)
+
+        # Get conversion metadata
+        if engine == "mineru":
+            meta = get_conversion_metadata()
+            mode = meta.get("mode", "cli")
+            print(f"  Backend: MinerU ({mode} mode)", file=sys.stderr)
+            if mode == "api":
+                print(
+                    f"  API Server: {meta.get('api_host')}:{meta.get('api_port')}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  GPUs: {meta.get('gpus', 'default')}", file=sys.stderr)
+                print(f"  Workers: {meta.get('num_workers', 1)}", file=sys.stderr)
+            print(f"  Batch Ratio: {meta.get('batch_ratio', 8)}", file=sys.stderr)
+            print(f"  Pages: {meta.get('page_count', 'unknown')}", file=sys.stderr)
+        elif engine == "docling":
+            print("  Backend: Docling", file=sys.stderr)
+            print(f"  Images Scale: {args.images_scale}", file=sys.stderr)
+
+        print(f"  Total Time: {elapsed_time:.2f}s", file=sys.stderr)
+
+        # Calculate pages per second if we have page count
+        if engine == "mineru":
+            meta = get_conversion_metadata()
+            page_count = meta.get("page_count", 0)
+            if page_count > 0 and elapsed_time > 0:
+                pps = page_count / elapsed_time
+                print(f"  Speed: {pps:.2f} pages/sec", file=sys.stderr)
+
+        print("=" * 50, file=sys.stderr)
 
 
 if __name__ == "__main__":
