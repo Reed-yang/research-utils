@@ -5,6 +5,7 @@
 #     "docling>=2.5.0",
 #     "torch>=2.0.0",
 #     "pypdf>=4.0.0",
+#     "pillow>=10.0.0",
 #     "requests>=2.31.0",
 # ]
 # [tool.uv]
@@ -18,7 +19,8 @@ Dual-backend strategy:
   - nougat: Slow, GPU-intensive, end-to-end Transformer, perfect for heavy LaTeX math
 
 Usage:
-  uv run ingest_paper.py <pdf_path_or_url> [--engine docling|nougat] [--output-dir <path>] [--images-scale <float>] [--force]
+  uv run ingest_paper.py <pdf_path_or_url> [--engine docling|nougat] [--output-dir <path>] [--images-scale <float>]
+    [--image-format source|png|jpg|jpeg|webp] [--image-quality <1-100>] [--image-lossless] [--force]
 
 Output:
   - Files organized in {cwd}/{YYYYMMDD}-{Sanitized_Title}/
@@ -188,17 +190,113 @@ def normalize_math_delimiters(text: str) -> str:
     return env_pattern.sub(wrap_env, text)
 
 
-def replace_image_placeholders(markdown_content: str, image_count: int) -> str:
+def replace_image_placeholders(
+    markdown_content: str, image_count: int, image_ext: str = ".png"
+) -> str:
     """Replace <!-- image --> placeholders with actual image references."""
     counter = [0]  # Use list to allow mutation in nested function
 
     def replacer(match):
         counter[0] += 1
         if counter[0] <= image_count:
-            return f"![Figure {counter[0]}](./assets/image_{counter[0]:03d}.png)"
+            return f"![Figure {counter[0]}](./assets/image_{counter[0]:03d}{image_ext})"
         return match.group(0)
 
     return re.sub(r"<!--\s*image\s*-->", replacer, markdown_content)
+
+
+def normalize_image_format(image_format: str | None) -> str:
+    """Normalize image format selection."""
+    if not image_format:
+        return "source"
+    normalized = image_format.strip().lower()
+    if normalized in ("source", "auto", "original", "keep"):
+        return "source"
+    if normalized == "jpg":
+        normalized = "jpeg"
+    if normalized not in ("png", "jpeg", "webp"):
+        raise ValueError(f"Unsupported image format: {image_format}")
+    return normalized
+
+
+def clamp_image_quality(quality: int) -> int:
+    """Clamp image quality to 1-100."""
+    return max(1, min(100, int(quality)))
+
+
+def get_image_extension(
+    image_format: str, source_ext: str | None = None, default_for_source: str = ".png"
+) -> str:
+    """Resolve output image extension."""
+    if image_format == "source":
+        if source_ext:
+            source_ext = source_ext.lower()
+            return source_ext if source_ext.startswith(".") else f".{source_ext}"
+        return default_for_source
+    if image_format == "jpeg":
+        return ".jpg"
+    return f".{image_format}"
+
+
+def save_pil_image(
+    pil_image,
+    output_path: Path,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
+) -> None:
+    """Save PIL image to target format."""
+    fmt = "JPEG" if image_format == "jpeg" else image_format.upper()
+    save_kwargs = {}
+
+    if image_format == "jpeg":
+        if pil_image.mode not in ("RGB", "L"):
+            pil_image = pil_image.convert("RGB")
+        save_kwargs.update(
+            {"quality": image_quality, "optimize": True, "progressive": True}
+        )
+    elif image_format == "webp":
+        save_kwargs.update({"method": 6, "lossless": image_lossless})
+        save_kwargs["quality"] = 100 if image_lossless else image_quality
+    elif image_format == "png":
+        save_kwargs.update({"optimize": True})
+
+    pil_image.save(str(output_path), format=fmt, **save_kwargs)
+
+
+def save_image_bytes(
+    img_bytes: bytes,
+    output_path: Path,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
+) -> None:
+    """Save image bytes in desired format."""
+    if image_format == "source":
+        with open(output_path, "wb") as f:
+            f.write(img_bytes)
+        return
+    from PIL import Image
+
+    with Image.open(io.BytesIO(img_bytes)) as img:
+        save_pil_image(img, output_path, image_format, image_quality, image_lossless)
+
+
+def reencode_image_file(
+    src_path: Path,
+    dest_path: Path,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
+) -> None:
+    """Re-encode an on-disk image to the target format."""
+    if image_format == "source":
+        shutil.copy2(src_path, dest_path)
+        return
+    from PIL import Image
+
+    with Image.open(src_path) as img:
+        save_pil_image(img, dest_path, image_format, image_quality, image_lossless)
 
 
 def wrap_inline_math(text: str) -> str:
@@ -474,6 +572,9 @@ def run_mineru_on_chunk(
 def merge_chunk_results(
     chunk_results: list[tuple[int, str, Path | None]],
     assets_dir: Path,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
 ) -> tuple[str, int]:
     """
     Merge markdown from multiple chunks and renumber images sequentially.
@@ -482,6 +583,9 @@ def merge_chunk_results(
     """
     # Sort by chunk index
     chunk_results.sort(key=lambda x: x[0])
+
+    image_format = normalize_image_format(image_format)
+    image_quality = clamp_image_quality(image_quality)
 
     assets_dir.mkdir(parents=True, exist_ok=True)
     merged_parts = []
@@ -498,8 +602,19 @@ def merge_chunk_results(
             for img_file in sorted(images_dir.iterdir()):
                 if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
                     global_image_counter += 1
-                    new_name = f"image_{global_image_counter:03d}{img_file.suffix}"
-                    shutil.copy2(img_file, assets_dir / new_name)
+                    source_ext = img_file.suffix.lower()
+                    target_ext = get_image_extension(
+                        image_format, source_ext, default_for_source=".png"
+                    )
+                    new_name = f"image_{global_image_counter:03d}{target_ext}"
+                    dest_path = assets_dir / new_name
+                    reencode_image_file(
+                        img_file,
+                        dest_path,
+                        image_format,
+                        image_quality,
+                        image_lossless,
+                    )
 
                     # Map various possible references
                     old_ref = f"images/{img_file.name}"
@@ -536,7 +651,12 @@ def merge_chunk_results(
 
 
 def convert_with_docling(
-    pdf_path: Path, assets_dir: Path, images_scale: float
+    pdf_path: Path,
+    assets_dir: Path,
+    images_scale: float,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using IBM Docling with image extraction.
@@ -546,6 +666,11 @@ def convert_with_docling(
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.pipeline_options import PdfPipelineOptions
         from docling.datamodel.base_models import InputFormat
+
+        image_format = normalize_image_format(image_format)
+        image_quality = clamp_image_quality(image_quality)
+        output_format = "png" if image_format == "source" else image_format
+        image_ext = get_image_extension(output_format)
 
         # Configure pipeline with image extraction
         pipeline_options = PdfPipelineOptions()
@@ -580,12 +705,20 @@ def convert_with_docling(
             for pic in doc.pictures:
                 if hasattr(pic, "image") and pic.image:
                     image_counter += 1
-                    image_name = f"image_{image_counter:03d}.png"
+                    image_name = f"image_{image_counter:03d}{image_ext}"
                     image_path = assets_dir / image_name
-                    pic.image.pil_image.save(str(image_path))
+                    save_pil_image(
+                        pic.image.pil_image,
+                        image_path,
+                        output_format,
+                        image_quality,
+                        image_lossless,
+                    )
 
         # Replace <!-- image --> placeholders with actual image references
-        markdown_content = replace_image_placeholders(markdown_content, image_counter)
+        markdown_content = replace_image_placeholders(
+            markdown_content, image_counter, image_ext
+        )
 
         return markdown_content, detected_title
 
@@ -630,6 +763,9 @@ def convert_via_mineru_api(
     assets_dir: Path,
     host: str = None,
     port: int = None,
+    image_format: str = "source",
+    image_quality: int = 95,
+    image_lossless: bool = False,
 ) -> tuple[str, str | None]:
     """
     Convert PDF via mineru-api REST server (persistent model, no reload overhead).
@@ -643,6 +779,8 @@ def convert_via_mineru_api(
 
     host = host or MINERU_API_HOST
     port = port or MINERU_API_PORT
+    image_format = normalize_image_format(image_format)
+    image_quality = clamp_image_quality(image_quality)
 
     try:
         # Upload PDF and convert via API
@@ -700,8 +838,11 @@ def convert_via_mineru_api(
         for img_filename, img_data_uri in images_dict.items():
             image_counter += 1
             # Determine extension from filename or default to jpg
-            ext = Path(img_filename).suffix or ".jpg"
-            img_name = f"image_{image_counter:03d}{ext}"
+            source_ext = Path(img_filename).suffix or ".jpg"
+            target_ext = get_image_extension(
+                image_format, source_ext, default_for_source=".jpg"
+            )
+            img_name = f"image_{image_counter:03d}{target_ext}"
             img_path = assets_dir / img_name
 
             # Parse data URI: data:image/jpeg;base64,/9j/4AAQ...
@@ -710,8 +851,13 @@ def convert_via_mineru_api(
 
                 base64_data = img_data_uri.split(";base64,", 1)[1]
                 img_bytes = base64.b64decode(base64_data)
-                with open(img_path, "wb") as f:
-                    f.write(img_bytes)
+                save_image_bytes(
+                    img_bytes,
+                    img_path,
+                    image_format,
+                    image_quality,
+                    image_lossless,
+                )
                 # Map original reference to new path
                 image_map[f"images/{img_filename}"] = f"./assets/{img_name}"
                 image_map[img_filename] = f"./assets/{img_name}"
@@ -752,6 +898,9 @@ def get_conversion_metadata() -> dict:
 def convert_with_mineru(
     pdf_path: Path,
     assets_dir: Path,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using MinerU (hybrid-auto-engine for best accuracy).
@@ -766,6 +915,8 @@ def convert_with_mineru(
     Returns (markdown_content, detected_title).
     """
     global _conversion_metadata
+    image_format = normalize_image_format(image_format)
+    image_quality = clamp_image_quality(image_quality)
     page_count = get_pdf_page_count(pdf_path)
     # === PRIORITY 1: Try mineru-api server (persistent model) ===
     if check_mineru_api_server():
@@ -780,8 +931,17 @@ def convert_with_mineru(
                 "api_host": MINERU_API_HOST,
                 "api_port": MINERU_API_PORT,
                 "page_count": page_count,
+                "image_format": image_format,
+                "image_quality": image_quality,
+                "image_lossless": image_lossless,
             }
-            return convert_via_mineru_api(pdf_path, assets_dir)
+            return convert_via_mineru_api(
+                pdf_path,
+                assets_dir,
+                image_format=image_format,
+                image_quality=image_quality,
+                image_lossless=image_lossless,
+            )
         except Exception as e:
             print(f"MinerU API failed: {e}, falling back to CLI", file=sys.stderr)
 
@@ -825,6 +985,9 @@ def convert_with_mineru(
         "num_workers": num_workers,
         "batch_ratio": batch_ratio,
         "page_count": page_count,
+        "image_format": image_format,
+        "image_quality": image_quality,
+        "image_lossless": image_lossless,
     }
 
     # Create temporary directory
@@ -881,8 +1044,19 @@ def convert_with_mineru(
                 for img_file in sorted(images_dir.iterdir()):
                     if img_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
                         image_counter += 1
-                        new_name = f"image_{image_counter:03d}{img_file.suffix}"
-                        shutil.copy2(img_file, assets_dir / new_name)
+                        source_ext = img_file.suffix.lower()
+                        target_ext = get_image_extension(
+                            image_format, source_ext, default_for_source=".png"
+                        )
+                        new_name = f"image_{image_counter:03d}{target_ext}"
+                        dest_path = assets_dir / new_name
+                        reencode_image_file(
+                            img_file,
+                            dest_path,
+                            image_format,
+                            image_quality,
+                            image_lossless,
+                        )
                         old_ref = f"images/{img_file.name}"
                         image_map[old_ref] = f"./assets/{new_name}"
 
@@ -945,7 +1119,13 @@ def convert_with_mineru(
                 chunk_results.append(result)
 
         # Merge results
-        markdown_content, total_images = merge_chunk_results(chunk_results, assets_dir)
+        markdown_content, total_images = merge_chunk_results(
+            chunk_results,
+            assets_dir,
+            image_format,
+            image_quality,
+            image_lossless,
+        )
 
         if not markdown_content:
             output_error("All MinerU chunk processes failed")
@@ -1090,6 +1270,24 @@ def main():
         help="Image scale factor for extraction (1.0 ~= 72 DPI). Use >1 for higher resolution.",
     )
     parser.add_argument(
+        "--image-format",
+        type=str,
+        default="source",
+        choices=["source", "png", "jpg", "jpeg", "webp"],
+        help="Output image format. 'source' keeps original format when available.",
+    )
+    parser.add_argument(
+        "--image-quality",
+        type=int,
+        default=95,
+        help="Image quality for lossy formats (1-100).",
+    )
+    parser.add_argument(
+        "--image-lossless",
+        action="store_true",
+        help="Use lossless encoding when supported (webp).",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Allow overwriting when a folder with the same title exists",
@@ -1111,6 +1309,10 @@ def main():
             if not pdf_path.suffix.lower() == ".pdf":
                 output_error(f"Not a PDF file: {pdf_path}")
 
+        image_format = normalize_image_format(args.image_format)
+        image_quality = clamp_image_quality(args.image_quality)
+        image_lossless = args.image_lossless
+
         # Convert based on engine
         engine = args.engine
         temp_assets = Path(tempfile.mkdtemp()) / "assets"
@@ -1118,11 +1320,20 @@ def main():
 
         if engine == "mineru":
             markdown_content, detected_title = convert_with_mineru(
-                pdf_path, temp_assets
+                pdf_path,
+                temp_assets,
+                image_format,
+                image_quality,
+                image_lossless,
             )
         elif engine == "docling":
             markdown_content, detected_title = convert_with_docling(
-                pdf_path, temp_assets, args.images_scale
+                pdf_path,
+                temp_assets,
+                args.images_scale,
+                image_format,
+                image_quality,
+                image_lossless,
             )
 
         # Normalize math delimiters to $...$ / $$...$$
@@ -1193,9 +1404,17 @@ def main():
                 print(f"  Workers: {meta.get('num_workers', 1)}", file=sys.stderr)
             print(f"  Batch Ratio: {meta.get('batch_ratio', 8)}", file=sys.stderr)
             print(f"  Pages: {meta.get('page_count', 'unknown')}", file=sys.stderr)
+            print(f"  Image Format: {meta.get('image_format', image_format)}", file=sys.stderr)
+            print(f"  Image Quality: {meta.get('image_quality', image_quality)}", file=sys.stderr)
+            if meta.get("image_lossless", image_lossless):
+                print("  Image Lossless: true", file=sys.stderr)
         elif engine == "docling":
             print("  Backend: Docling", file=sys.stderr)
             print(f"  Images Scale: {args.images_scale}", file=sys.stderr)
+            print(f"  Image Format: {image_format}", file=sys.stderr)
+            print(f"  Image Quality: {image_quality}", file=sys.stderr)
+            if image_lossless:
+                print("  Image Lossless: true", file=sys.stderr)
 
         print(f"  Total Time: {elapsed_time:.2f}s", file=sys.stderr)
 
