@@ -11,6 +11,7 @@ from mineru.backend.hybrid.hybrid_magic_model import MagicModel
 from mineru.backend.utils import cross_page_table_merge
 from mineru.utils.config_reader import get_table_enable, get_llm_aided_config
 from mineru.utils.cut_image import cut_image_and_table
+from mineru.utils.image_merge import merge_adjacent_image_blocks, merge_image_spans, rebind_image_block_spans
 from mineru.utils.enum_class import ContentType
 from mineru.utils.hash_utils import bytes_md5
 from mineru.utils.ocr_utils import OcrConfidence
@@ -63,6 +64,7 @@ def blocks_to_page_info(
         _vlm_ocr_enable,
     )
     image_blocks = magic_model.get_image_blocks()
+    image_blocks = merge_adjacent_image_blocks(image_blocks)
     table_blocks = magic_model.get_table_blocks()
     title_blocks = magic_model.get_title_blocks()
     discarded_blocks = magic_model.get_discarded_blocks()
@@ -108,6 +110,14 @@ def blocks_to_page_info(
     interline_equation_blocks = magic_model.get_interline_equation_blocks()
 
     all_spans = magic_model.get_all_spans()
+    image_body_blocks = []
+    for block in image_blocks:
+        for sub_block in block.get("blocks", []):
+            if sub_block.get("type") == "image_body":
+                image_body_blocks.append(sub_block)
+                break
+    all_spans = merge_image_spans(all_spans, image_body_blocks)
+    rebind_image_block_spans(image_blocks, all_spans)
     # 对image/table/interline_equation的span截图
     for span in all_spans:
         if span["type"] in [ContentType.IMAGE, ContentType.TABLE, ContentType.INTERLINE_EQUATION]:

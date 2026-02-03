@@ -13,6 +13,7 @@ from mineru.utils.block_pre_proc import prepare_block_bboxes, process_groups
 from mineru.utils.block_sort import sort_blocks_by_bbox
 from mineru.utils.boxbase import calculate_overlap_area_in_bbox1_area_ratio
 from mineru.utils.cut_image import cut_image_and_table
+from mineru.utils.image_merge import merge_adjacent_images, merge_image_spans
 from mineru.utils.enum_class import ContentType
 from mineru.utils.llm_aided import llm_aided_title
 from mineru.utils.model_utils import clean_memory
@@ -47,12 +48,20 @@ def page_model_info_to_page_info(page_model_info, image_dict, page, image_writer
         img_groups, 'image_body', 'image_caption_list', 'image_footnote_list'
     )
 
+    """合并相邻的图片块（网格图等）"""
+    img_body_blocks, img_caption_blocks = merge_adjacent_images(
+        img_body_blocks, img_caption_blocks
+    )
+
     table_body_blocks, table_caption_blocks, table_footnote_blocks, _ = process_groups(
         table_groups, 'table_body', 'table_caption_list', 'table_footnote_list'
     )
 
     """获取所有的spans信息"""
     spans = magic_model.get_all_spans()
+
+    """合并被合并block对应的image spans"""
+    spans = merge_image_spans(spans, img_body_blocks)
 
     """某些图可能是文本块，通过简单的规则判断一下"""
     if len(maybe_text_image_blocks) > 0:
