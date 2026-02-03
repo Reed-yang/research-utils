@@ -23,6 +23,15 @@ uv run scripts/ingest_paper.py paper.pdf --engine docling
 uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
 ```
 
+## MinerU API Server (Recommended)
+
+```bash
+# Start server with uv + local mineru-fork
+CUDA_VISIBLE_DEVICES=0 \
+  uv run --python mineru-fork/.venv \
+  python -m mineru.cli.fast_api --host 127.0.0.1 --port 8000
+```
+
 ## Engine Selection
 
 | Scenario | Engine | Notes |
@@ -88,7 +97,7 @@ aliases: []
 ## Image Handling
 
 - **Both engines**: Extract images to `assets/` folder
-- **Markdown references**: `![Fig1](./assets/image_001.png)` (relative paths)
+- **Markdown references**: `![Fig1](./assets/image_001.webp)` (relative paths)
 - **Syncthing compatible**: Small image files sync across devices
 
 ## Math Formatting

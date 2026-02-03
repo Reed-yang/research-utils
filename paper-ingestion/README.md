@@ -28,9 +28,10 @@ For the best performance (10x speedup), run a persistent MinerU server. This loa
 **Step 1: Start the Server (Background)**
 
 ```bash
-# Start server on GPU 0 (adjust device as needed)
-CUDA_VISIBLE_DEVICES=0 MINERU_HYBRID_BATCH_RATIO=16 \
-    nohup mineru-api --host 127.0.0.1 --port 8000 > mineru.log 2>&1 &
+# Start server with uv + local mineru-fork (adjust device as needed)
+CUDA_VISIBLE_DEVICES=0 \
+  uv run --python /mnt/beegfs/siyuan/workspace/research-utils/paper-ingestion/mineru-fork/.venv \
+  python -m mineru.cli.fast_api --host 127.0.0.1 --port 8000
 ```
 
 **Step 2: Ingest Papers**
@@ -72,8 +73,8 @@ Papers are organized in timestamps folders to keep your research clean:
 ├── full_text.md        # Converted Markdown (with YAML frontmatter)
 ├── notes.md            # Empty notes file for your analysis
 └── assets/             # Extracted figures and images
-    ├── image_001.png
-    └── image_002.png
+    ├── image_001.webp
+    └── image_002.webp
 ```
 
 ## 📊 Performance Analysis
@@ -91,6 +92,12 @@ You can tweak performance via environment variables:
 
 - `MINERU_HYBRID_BATCH_RATIO`: Controls internal batch size (Default: 16). Lower to 8 if encountering OOM.
 - `MINERU_API_HOST` / `MINERU_API_PORT`: Configure API endpoint (Default: 127.0.0.1:8000).
+- `MINERU_IMAGE_FORMAT`: Image output format (`webp`/`jpeg`/`png`, default: `webp`).
+- `MINERU_IMAGE_QUALITY`: Lossy quality 1-100 (default: 95).
+- `MINERU_IMAGE_LOSSLESS`: Lossless mode for WebP (`1`/`true` to enable, default: false).
+- `MINERU_PDF_RENDER_DPI`: PDF render DPI (default: 300).
+- `MINERU_PDF_RENDER_MAX_SIDE`: Max render long side (default: 4500).
+- `MINERU_VLLM_GPU_MEMORY_UTILIZATION`: vLLM GPU memory ratio (0-1, default: auto).
 
 ---
 
