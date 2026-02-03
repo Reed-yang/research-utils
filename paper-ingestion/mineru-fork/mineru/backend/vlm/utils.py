@@ -77,6 +77,19 @@ def set_lmdeploy_backend(device_type: str) -> str:
 
 
 def set_default_gpu_memory_utilization() -> float:
+    env_val = os.getenv("MINERU_VLLM_GPU_MEMORY_UTILIZATION")
+    if env_val is not None:
+        try:
+            value = float(env_val)
+            if 0.0 < value <= 1.0:
+                return value
+            logger.warning(
+                f"Invalid MINERU_VLLM_GPU_MEMORY_UTILIZATION: {env_val}, fallback to auto."
+            )
+        except ValueError:
+            logger.warning(
+                f"Invalid MINERU_VLLM_GPU_MEMORY_UTILIZATION: {env_val}, fallback to auto."
+            )
     from vllm import __version__ as vllm_version
     device = get_device()
     gpu_memory = get_vram(device)

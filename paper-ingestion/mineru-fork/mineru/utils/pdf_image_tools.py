@@ -12,7 +12,13 @@ from PIL import Image, ImageOps
 from mineru.data.data_reader_writer import FileBasedDataWriter
 from mineru.utils.check_sys_env import is_windows_environment
 from mineru.utils.os_env_config import get_load_images_timeout, get_load_images_threads
-from mineru.utils.pdf_reader import image_to_b64str, image_to_bytes, page_to_image
+from mineru.utils.pdf_reader import (
+    get_image_extension,
+    get_image_save_settings,
+    image_to_b64str,
+    image_to_bytes,
+    page_to_image,
+)
 from mineru.utils.enum_class import ImageType
 from mineru.utils.hash_utils import str_sha256
 from mineru.utils.pdf_page_id import get_end_page_id
@@ -20,7 +26,7 @@ from mineru.utils.pdf_page_id import get_end_page_id
 from concurrent.futures import ProcessPoolExecutor, wait, ALL_COMPLETED
 
 
-def pdf_page_to_image(page: pdfium.PdfPage, dpi=200, image_type=ImageType.PIL) -> dict:
+def pdf_page_to_image(page: pdfium.PdfPage, dpi=300, image_type=ImageType.PIL) -> dict:
     """Convert pdfium.PdfDocument to image, Then convert the image to base64.
 
     Args:
@@ -54,7 +60,7 @@ def _load_images_from_pdf_worker(
 
 def load_images_from_pdf(
     pdf_bytes: bytes,
-    dpi=200,
+    dpi=300,
     start_page_id=0,
     end_page_id=None,
     image_type=ImageType.PIL,
@@ -223,9 +229,9 @@ def cut_image(
     image_writer: FileBasedDataWriter,
     scale=2,
 ):
-    """从第page_num页的page中，根据bbox进行裁剪出一张jpg图片，返回图片路径 save_path：需要同时支持s3和本地,
+    """从第page_num页的page中，根据bbox进行裁剪出一张图片，返回图片路径 save_path：需要同时支持s3和本地,
     图片存放在save_path下，文件名是:
-    {page_num}_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}.jpg , bbox内数字取整。"""
+    {page_num}_{bbox[0]}_{bbox[1]}_{bbox[2]}_{bbox[3]}.<ext> , bbox内数字取整。"""
 
     # 拼接文件名
     filename = f"{page_num}_{int(bbox[0])}_{int(bbox[1])}_{int(bbox[2])}_{int(bbox[3])}"
@@ -233,13 +239,21 @@ def cut_image(
     # 老版本返回不带bucket的路径
     img_path = f"{return_path}_{filename}" if return_path is not None else None
 
+    image_format, image_quality, image_lossless = get_image_save_settings()
+    image_ext = get_image_extension(image_format)
+
     # 新版本生成平铺路径
-    img_hash256_path = f"{str_sha256(img_path)}.jpg"
+    img_hash256_path = f"{str_sha256(img_path)}{image_ext}"
     # img_hash256_path = f'{img_path}.jpg'
 
     crop_img = get_crop_img(bbox, page_pil_img, scale=scale)
 
-    img_bytes = image_to_bytes(crop_img, image_format="JPEG")
+    img_bytes = image_to_bytes(
+        crop_img,
+        image_format=image_format,
+        quality=image_quality,
+        lossless=image_lossless,
+    )
 
     image_writer.write(img_hash256_path, img_bytes)
     return img_hash256_path

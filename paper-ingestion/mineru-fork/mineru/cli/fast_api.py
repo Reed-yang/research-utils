@@ -111,6 +111,26 @@ def encode_image(image_path: str) -> str:
         return b64encode(f.read()).decode()
 
 
+def image_mime_type(image_path: str) -> str:
+    suffix = Path(image_path).suffix.lower()
+    if suffix in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if suffix == ".png":
+        return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
+    return "application/octet-stream"
+
+
+def collect_image_paths(images_dir: str) -> list[str]:
+    patterns = ("*.jpg", "*.jpeg", "*.png", "*.webp")
+    image_paths = []
+    for pattern in patterns:
+        safe_pattern = os.path.join(glob.escape(images_dir), pattern)
+        image_paths.extend(glob.glob(safe_pattern))
+    return sorted(set(image_paths))
+
+
 def get_infer_result(
     file_suffix_identifier: str, pdf_name: str, parse_dir: str
 ) -> Optional[str]:
@@ -396,12 +416,12 @@ async def parse_pdf(
                         )
                     if return_images:
                         images_dir = os.path.join(parse_dir, "images")
-                        safe_pattern = os.path.join(glob.escape(images_dir), "*.jpg")
-                        image_paths = glob.glob(safe_pattern)
+                        image_paths = collect_image_paths(images_dir)
                         data["images"] = {
-                            os.path.basename(
-                                image_path
-                            ): f"data:image/jpeg;base64,{encode_image(image_path)}"
+                            os.path.basename(image_path): (
+                                f"data:{image_mime_type(image_path)};base64,"
+                                f"{encode_image(image_path)}"
+                            )
                             for image_path in image_paths
                         }
 
