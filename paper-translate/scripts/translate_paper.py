@@ -82,9 +82,10 @@ DEEPSEEK_BASE_URL = os.environ.get(
 )
 
 # Translation settings
-DEFAULT_MAX_CHARS_PER_CHUNK = 3000  # DeepSeek default
+DEFAULT_MAX_CHARS_PER_CHUNK = 8000
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0
+CHUNK_MISSING_RETRIES = 3
 MAX_WORKERS = 10
 
 
@@ -127,7 +128,7 @@ class OpenAICompatibleBackend(LLMBackend):
 
         client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-        system_prompt = f"""You are a professional translator specializing in academic papers. 
+        system_prompt = f"""You are a professional translator specializing in academic papers.
 Translate the following text to {target_lang}.
 
 CRITICAL RULES:
@@ -141,10 +142,11 @@ CRITICAL RULES:
    - Author names and affiliations
    - Mathematical variable names and symbols
 
-2. Maintain the exact same formatting and structure
-3. Preserve all newlines and paragraph breaks
-4. Use accurate academic/technical terminology
-5. Output ONLY the translated text, no explanations"""
+2. Preserve all placeholders exactly as-is (for example: ⟦...⟧, <!--PARA_...-->)
+3. Maintain the exact same formatting and structure
+4. Preserve all newlines and paragraph breaks; do not merge/split/reorder paragraphs
+5. Use accurate academic/technical terminology
+6. Output ONLY the translated text, no explanations"""
 
         messages = []
         if context:
@@ -232,6 +234,8 @@ class MarkdownTranslator:
 
     # Patterns for content that should NOT be translated
     PROTECTED_PATTERNS = [
+        # Paragraph markers for integrity checks
+        (r'<!--PARA_\d+-->', 'PARA_MARKER'),
         # LaTeX display math
         (r'\$\$[\s\S]+?\$\$', 'LATEX_DISPLAY'),
         # LaTeX inline math
@@ -252,23 +256,58 @@ class MarkdownTranslator:
         (r'^---+$', 'HR'),
     ]
 
-    def __init__(self, backend: LLMBackend, target_lang: str = "Chinese"):
+    def __init__(
+        self,
+        backend: LLMBackend,
+        target_lang: str = "Chinese",
+        max_chars_per_chunk: int | None = None,
+        chunk_missing_retries: int | None = None,
+    ):
         self.backend = backend
         self.target_lang = target_lang
         self.placeholder_map: dict[str, str] = {}
         self.placeholder_counter = 0
-        self.max_chars_per_chunk = getattr(
-            backend,
-            "max_chars_per_chunk",
-            DEFAULT_MAX_CHARS_PER_CHUNK,
-        )
+        self.paragraph_placeholders: list[str] = []
+        self.expected_markers_by_chunk: list[list[str]] = []
+        if max_chars_per_chunk is not None:
+            self.max_chars_per_chunk = max_chars_per_chunk
+        else:
+            self.max_chars_per_chunk = getattr(
+                backend,
+                "max_chars_per_chunk",
+                DEFAULT_MAX_CHARS_PER_CHUNK,
+            )
+        if chunk_missing_retries is not None:
+            self.chunk_missing_retries = chunk_missing_retries
+        else:
+            self.chunk_missing_retries = CHUNK_MISSING_RETRIES
 
     def _create_placeholder(self, content: str, ptype: str) -> str:
         """Create a unique placeholder for protected content."""
         self.placeholder_counter += 1
         placeholder = f"⟦{ptype}_{self.placeholder_counter}⟧"
         self.placeholder_map[placeholder] = content
+        if ptype == "PARA_MARKER":
+            self.paragraph_placeholders.append(placeholder)
         return placeholder
+
+    def _inject_paragraph_markers(self, text: str) -> tuple[str, list[str]]:
+        """Insert paragraph markers for integrity checks."""
+        paragraphs = re.split(r'\n\n+', text)
+        marked_paragraphs: list[str] = []
+        markers: list[str] = []
+        for idx, para in enumerate(paragraphs, start=1):
+            marker = f"<!--PARA_{idx:04d}-->"
+            markers.append(marker)
+            if para:
+                marked_paragraphs.append(f"{marker}\n{para}")
+            else:
+                marked_paragraphs.append(marker)
+        return "\n\n".join(marked_paragraphs), markers
+
+    def _strip_paragraph_markers(self, text: str) -> str:
+        """Remove paragraph markers after restoration."""
+        return re.sub(r'<!--PARA_\d+-->\n?', '', text)
 
     def _protect_content(self, text: str) -> str:
         """Replace protected content with placeholders."""
@@ -463,6 +502,151 @@ class MarkdownTranslator:
 
         return chunks
 
+    def _split_into_chunks_with_markers(
+        self,
+        text: str,
+        max_chars: int | None = None,
+    ) -> tuple[list[str], list[list[str]]]:
+        """Split text into chunks while tracking paragraph markers."""
+        paragraphs = re.split(r'\n\n+', text)
+        max_chars = max_chars or self.max_chars_per_chunk
+
+        chunks: list[str] = []
+        markers_by_chunk: list[list[str]] = []
+        current_chunk: list[str] = []
+        current_markers: list[str] = []
+        current_length = 0
+
+        for para in paragraphs:
+            para_length = len(para)
+            para_markers = re.findall(r'⟦PARA_MARKER_\d+⟧', para)
+
+            if current_length + para_length > max_chars and current_chunk:
+                chunks.append('\n\n'.join(current_chunk))
+                markers_by_chunk.append(current_markers)
+                current_chunk = []
+                current_markers = []
+                current_length = 0
+
+            current_chunk.append(para)
+            current_markers.extend(para_markers)
+            current_length += para_length + 2
+
+        if current_chunk:
+            chunks.append('\n\n'.join(current_chunk))
+            markers_by_chunk.append(current_markers)
+
+        return chunks, markers_by_chunk
+
+    def _log_chunk(self, chunk_index: int, message: str) -> None:
+        print(f"  Chunk {chunk_index + 1}: {message}", file=sys.stderr)
+
+    def _log_subchunk(self, chunk_index: int, sub_index: int, sub_total: int, message: str) -> None:
+        print(
+            f"    Chunk {chunk_index + 1} sub {sub_index}/{sub_total}: {message}",
+            file=sys.stderr,
+        )
+
+    def _translate_subchunks(
+        self,
+        subchunks: list[str],
+        markers_by_subchunk: list[list[str]],
+        chunk_index: int,
+        context: str | None,
+    ) -> tuple[TranslationResult, bool]:
+        translated_parts: list[str] = []
+        for sub_index, subchunk in enumerate(subchunks, start=1):
+            result = self.backend.translate(subchunk, self.target_lang, context)
+            if not result.success:
+                error_message = result.error or "unknown error"
+                self._log_subchunk(chunk_index, sub_index, len(subchunks), f"failed: {error_message}")
+                return result, False
+            expected_markers = markers_by_subchunk[sub_index - 1]
+            missing = [m for m in expected_markers if m not in (result.text or "")]
+            if missing:
+                self._log_subchunk(
+                    chunk_index,
+                    sub_index,
+                    len(subchunks),
+                    f"missing markers: {', '.join(missing)}",
+                )
+                return TranslationResult(
+                    text="",
+                    success=False,
+                    error=(
+                        "Translation failed: missing paragraph markers in "
+                        f"chunk {chunk_index + 1} subchunk {sub_index}: {', '.join(missing)}"
+                    ),
+                ), True
+            self._log_subchunk(chunk_index, sub_index, len(subchunks), "ok")
+            translated_parts.append(result.text)
+        return TranslationResult(text="\n\n".join(translated_parts), success=True), False
+
+    def _translate_chunk_with_retry(
+        self,
+        chunk: str,
+        expected_markers: list[str],
+        chunk_index: int,
+        context: str | None,
+    ) -> TranslationResult:
+        """Translate a chunk and retry with smaller subchunks if markers are missing."""
+        result = self.backend.translate(chunk, self.target_lang, context)
+        if not result.success:
+            error_message = result.error or "unknown error"
+            self._log_chunk(chunk_index, f"failed: {error_message} (no chunk retry)")
+            return result
+        missing = [m for m in expected_markers if m not in (result.text or "")]
+        if not missing:
+            self._log_chunk(chunk_index, "ok")
+            return result
+
+        self._log_chunk(chunk_index, f"missing markers: {', '.join(missing)}")
+        last_missing_error = (
+            "Translation failed: missing paragraph markers in "
+            f"chunk {chunk_index + 1}: {', '.join(missing)}"
+        )
+        for retry_attempt in range(1, self.chunk_missing_retries + 1):
+            split_max_chars = max(400, self.max_chars_per_chunk // (2 ** retry_attempt))
+            subchunks, markers_by_subchunk = self._split_into_chunks_with_markers(
+                chunk,
+                max_chars=split_max_chars,
+            )
+            if len(subchunks) <= 1:
+                self._log_chunk(
+                    chunk_index,
+                    f"retry {retry_attempt}/{self.chunk_missing_retries}: split skipped (chunk too small)",
+                )
+                continue
+            self._log_chunk(
+                chunk_index,
+                f"retry {retry_attempt}/{self.chunk_missing_retries}: split into "
+                f"{len(subchunks)} subchunks (max_chars={split_max_chars})",
+            )
+            split_result, retryable_missing = self._translate_subchunks(
+                subchunks,
+                markers_by_subchunk,
+                chunk_index,
+                context,
+            )
+            if split_result.success:
+                self._log_chunk(
+                    chunk_index,
+                    f"ok after split retry {retry_attempt}/{self.chunk_missing_retries}",
+                )
+                return split_result
+            if not retryable_missing:
+                return split_result
+            last_missing_error = split_result.error or last_missing_error
+        self._log_chunk(
+            chunk_index,
+            f"missing markers after {self.chunk_missing_retries} retries",
+        )
+        return TranslationResult(
+            text="",
+            success=False,
+            error=last_missing_error,
+        )
+
     def translate_markdown(self, content: str) -> tuple[str, bool, str | None]:
         """
         Translate markdown content while preserving structure.
@@ -475,6 +659,8 @@ class MarkdownTranslator:
         # Reset placeholder state
         self.placeholder_map = {}
         self.placeholder_counter = 0
+        self.paragraph_placeholders = []
+        self.expected_markers_by_chunk = []
 
         # Remove references section before translation
         body, removed_refs = self._strip_references_section(body)
@@ -485,11 +671,12 @@ class MarkdownTranslator:
         if context:
             print("Context extracted for chunk translation.", file=sys.stderr)
 
-        # Protect content that shouldn't be translated
-        protected_body = self._protect_content(body)
+        # Insert paragraph markers and protect content
+        body_with_markers, _ = self._inject_paragraph_markers(body)
+        protected_body = self._protect_content(body_with_markers)
 
         # Split into chunks for translation
-        chunks = self._split_into_chunks(protected_body)
+        chunks, self.expected_markers_by_chunk = self._split_into_chunks_with_markers(protected_body)
 
         print(f"Translating {len(chunks)} chunks...", file=sys.stderr)
 
@@ -507,9 +694,10 @@ class MarkdownTranslator:
                     continue
 
                 future = executor.submit(
-                    self.backend.translate,
+                    self._translate_chunk_with_retry,
                     chunk,
-                    self.target_lang,
+                    self.expected_markers_by_chunk[i],
+                    i,
                     context,
                 )
                 futures[future] = i
@@ -531,6 +719,7 @@ class MarkdownTranslator:
 
         # Restore protected content
         translated_body = self._restore_content(translated_body)
+        translated_body = self._strip_paragraph_markers(translated_body)
 
         # Update frontmatter with language tag
         if frontmatter:
@@ -584,6 +773,18 @@ def main():
         default=None,
         help="Output file path (default: input_file with _zh suffix)"
     )
+    parser.add_argument(
+        "--max-chars-per-chunk",
+        type=int,
+        default=None,
+        help="Override max chars per chunk (default: backend setting)"
+    )
+    parser.add_argument(
+        "--chunk-retries",
+        type=int,
+        default=None,
+        help="Retries for missing paragraph markers (default: config)"
+    )
 
     args = parser.parse_args()
 
@@ -619,7 +820,21 @@ def main():
     except Exception as e:
         output_error(f"Failed to initialize backend: {e}")
 
-    translator = MarkdownTranslator(backend, args.target_lang)
+    translator = MarkdownTranslator(
+        backend,
+        args.target_lang,
+        max_chars_per_chunk=args.max_chars_per_chunk,
+        chunk_missing_retries=args.chunk_retries,
+    )
+
+    print(
+        f"Max chars per chunk: {translator.max_chars_per_chunk}",
+        file=sys.stderr,
+    )
+    print(
+        f"Chunk missing retries: {translator.chunk_missing_retries}",
+        file=sys.stderr,
+    )
 
     # Translate
     start_time = time.time()
