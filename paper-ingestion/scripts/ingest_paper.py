@@ -1,16 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "docling>=2.5.0",
-#     "torch>=2.0.0",
-#     "pypdf>=4.0.0",
-#     "pillow>=10.0.0",
-#     "requests>=2.31.0",
-# ]
-# [tool.uv]
-# exclude-newer = "2025-12-01"
-# ///
+#!/usr/bin/env -S uv run
 """
 Paper Ingestion Tool - Convert PDF papers to Markdown for AI-native research workflow.
 

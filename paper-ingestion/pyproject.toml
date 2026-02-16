@@ -1,0 +1,22 @@
+[project]
+name = "paper-ingestion"
+version = "0.1.0"
+description = "Ingest PDF research papers and convert to Markdown"
+requires-python = ">=3.10"
+dependencies = [
+    "pypdf>=4.0.0",
+    "pillow>=10.0.0",
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+docling = [
+    "docling>=2.5.0",
+    "torch>=2.0.0",
+]
+mineru = [
+    "mineru[pipeline,api]",
+]
+
+[tool.uv.sources]
+mineru = { path = "mineru-fork", editable = true }

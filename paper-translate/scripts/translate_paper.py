@@ -1,12 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "markdown-it-py>=3.0.0",
-#     "openai>=1.0.0",
-#     "requests>=2.31.0",
-# ]
-# ///
+#!/usr/bin/env -S uv run
 """
 Paper Translation Tool - Translate research paper markdown to Chinese.
 

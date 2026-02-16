@@ -2,36 +2,57 @@
 
 A high-performance toolkit for converting PDF research papers into AI-native Markdown formats. Designed for researchers who need to analyze papers with LLMs, preserving complex layouts, mathematical formulas, and extracting figures as standalone assets.
 
-## 🚀 Key Features
+## Key Features
 
 - **High-Fidelity Conversion**: Uses [MinerU](https://github.com/opendatalab/MinerU) (hybrid-auto-engine) for state-of-the-art PDF parsing.
 - **10x Efficiency Boost**: Supports persistent API Server mode to eliminate model loading overhead (processing time reduced from ~130s to ~12s).
 - **Asset Extraction**: Automatically extracts images and figures into a local `assets/` directory.
 - **Math Support**: High-quality LaTeX formula recognition ($...$ and $$...$$).
 - **Smart Organization**: Automatically renames and organizes output folders by date and paper title.
+- **Modular Dependencies**: Engine dependencies are optional — install only what you need.
 
-## 📦 Installation
+## Installation
 
-Ensure you have `uv` installed for dependency management.
+Requires [uv](https://docs.astral.sh/uv/) for dependency management.
 
 ```bash
-# Install dependencies
-uv pip install -U "mineru[all]" requests psutil
+cd paper-ingestion
+
+# Base only (pypdf, pillow, requests)
+uv sync
+
+# Add MinerU engine (GPU-accelerated, from local mineru-fork)
+uv sync --extra mineru
+
+# Add Docling engine (CPU-friendly fallback)
+uv sync --extra docling
+
+# Install all engines
+uv sync --all-extras
 ```
 
-## 🛠️ Usage Guide
+### Dependency Groups
 
-### 1. ⚡ Recommended: API Server Mode (Fastest)
+| Group | Command | What's installed |
+|-------|---------|------------------|
+| Base | `uv sync` | `pypdf`, `pillow`, `requests` (~7 packages) |
+| MinerU | `uv sync --extra mineru` | + `mineru[pipeline,api]` from local fork (~134 packages, includes torch + CUDA) |
+| Docling | `uv sync --extra docling` | + `docling`, `torch` (~70 packages) |
+| All | `uv sync --all-extras` | Everything (~199 packages) |
+
+> The `mineru` extra installs from the local `mineru-fork/` subtree as an editable dependency. Any changes to the fork code take effect immediately.
+
+## Usage Guide
+
+### 1. Recommended: API Server Mode (Fastest)
 
 For the best performance (10x speedup), run a persistent MinerU server. This loads the heavy ML models once into GPU memory, allowing subsequent papers to be processed in seconds.
 
 **Step 1: Start the Server (Background)**
 
 ```bash
-# Start server with uv + local mineru-fork (adjust device as needed)
-CUDA_VISIBLE_DEVICES=0 \
-  uv run --python /mnt/beegfs/siyuan/workspace/research-utils/paper-ingestion/mineru-fork/.venv \
-  python -m mineru.cli.fast_api --host 127.0.0.1 --port 8000
+# Requires: uv sync --extra mineru
+CUDA_VISIBLE_DEVICES=0 uv run mineru-api --host 127.0.0.1 --port 8000
 ```
 
 **Step 2: Ingest Papers**
@@ -51,21 +72,19 @@ uv run scripts/ingest_paper.py papers/my_paper.pdf
 If the server is not running, the script falls back to CLI mode. This handles model loading per-run (slower, ~1-2 mins per paper).
 
 ```bash
-# Useful for one-off tasks without setting up a server
 uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2512.05905"
 ```
 
-### 3. Benchmarking
-
-Use the included benchmark suite to test system performance and verify speedups.
+### 3. Docling Engine (No GPU)
 
 ```bash
-uv run scripts/benchmark.py --gpus 0,1 --output-dir ./benchmarks
+# Requires: uv sync --extra docling
+uv run scripts/ingest_paper.py paper.pdf --engine docling
 ```
 
-## 📂 Output Structure
+## Output Structure
 
-Papers are organized in timestamps folders to keep your research clean:
+Papers are organized in timestamped folders:
 
 ```text
 ./20260202-My_Research_Paper_Title/
@@ -77,27 +96,22 @@ Papers are organized in timestamps folders to keep your research clean:
     └── image_002.webp
 ```
 
-## 📊 Performance Analysis
+## Performance
 
-Based on benchmarks (H100 GPU):
+Based on benchmarks (H100 GPU, 15-page paper):
 
-| Mode | Processing Time (15 pages) | Throughput | Notes |
-|------|---------------------------|------------|-------|
-| **API Server** | **~12s** | **~1.25 pg/s** | **Recommended.** Models loaded once. |
+| Mode | Processing Time | Throughput | Notes |
+|------|----------------|------------|-------|
+| **API Server** | **~12s** | **~1.25 pg/s** | Recommended. Models loaded once. |
 | CLI Mode | ~130s | ~0.11 pg/s | High overhead per run. |
 
-## ⚙️ Configuration
+## Configuration
 
-You can tweak performance via environment variables:
+Environment variables:
 
-- `MINERU_HYBRID_BATCH_RATIO`: Controls internal batch size (Default: 16). Lower to 8 if encountering OOM.
-- `MINERU_API_HOST` / `MINERU_API_PORT`: Configure API endpoint (Default: 127.0.0.1:8000).
-- `MINERU_IMAGE_FORMAT`: Image output format (`webp`/`jpeg`/`png`, default: `webp`).
-- `MINERU_IMAGE_QUALITY`: Lossy quality 1-100 (default: 95).
-- `MINERU_IMAGE_LOSSLESS`: Lossless mode for WebP (`1`/`true` to enable, default: false).
-- `MINERU_PDF_RENDER_DPI`: PDF render DPI (default: 300).
-- `MINERU_PDF_RENDER_MAX_SIDE`: Max render long side (default: 4500).
-- `MINERU_VLLM_GPU_MEMORY_UTILIZATION`: vLLM GPU memory ratio (0-1, default: auto).
+- `MINERU_API_HOST` / `MINERU_API_PORT`: API endpoint (default: `127.0.0.1:8000`)
+- `MINERU_HYBRID_BATCH_RATIO`: Internal batch size (default: 16). Lower to 8 if OOM.
+- `CUDA_VISIBLE_DEVICES`: GPU selection for server or CLI mode.
 
 ---
 

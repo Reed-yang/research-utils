@@ -10,6 +10,8 @@ Convert PDF research papers to Markdown with image extraction, organized for AI-
 ## Quick Reference
 
 ```bash
+cd paper-ingestion
+
 # From local file (default: mineru engine)
 uv run scripts/ingest_paper.py /path/to/paper.pdf
 
@@ -25,19 +27,23 @@ uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
 
 ## MinerU API Server (Recommended)
 
+For the best performance, run a persistent MinerU API server. This loads models once into GPU memory, giving ~10x speedup on subsequent papers.
+
 ```bash
-# Start server with uv + local mineru-fork
-CUDA_VISIBLE_DEVICES=0 \
-  uv run --python mineru-fork/.venv \
-  python -m mineru.cli.fast_api --host 127.0.0.1 --port 8000
+cd paper-ingestion
+
+# Start server (requires --extra mineru)
+CUDA_VISIBLE_DEVICES=0 uv run mineru-api --host 127.0.0.1 --port 8000
 ```
+
+The ingestion script auto-detects the server at `127.0.0.1:8000` and uses it when available. If the server is not running, it falls back to the `mineru` CLI (slower, loads models per-run).
 
 ## Engine Selection
 
-| Scenario | Engine | Notes |
-|----------|--------|-------|
-| Default (highest quality) | `mineru` | GPU-accelerated, excellent math/tables |
-| Fallback (fast, no GPU) | `docling` | Lower quality, good for quick previews |
+| Scenario | Engine | Extra needed | Notes |
+|----------|--------|--------------|-------|
+| Default (highest quality) | `mineru` | `--extra mineru` | GPU-accelerated, excellent math/tables |
+| Fallback (fast, no GPU) | `docling` | `--extra docling` | Lower quality, good for quick previews |
 
 ## Output Structure
 
@@ -103,3 +109,25 @@ aliases: []
 ## Math Formatting
 
 - Inline and display math are normalized to LaTeX using `$...$` / `$$...$$`
+
+## Environment Setup (if there is no env yet)
+
+Dependencies are managed via `pyproject.toml` with optional extras. Install only what you need:
+
+```bash
+cd paper-ingestion
+
+# Base only (pypdf, pillow, requests — enough for mineru API mode)
+uv sync
+
+# MinerU engine (local mineru-fork, GPU-accelerated)
+uv sync --extra mineru
+
+# Docling engine (CPU-friendly fallback)
+uv sync --extra docling
+
+# Everything
+uv sync --all-extras
+```
+
+> **Note:** `mineru` is installed as an editable dependency from the local `mineru-fork/` subtree. Changes to the fork take effect immediately without reinstalling.
