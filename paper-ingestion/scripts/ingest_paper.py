@@ -2,12 +2,13 @@
 """
 Paper Ingestion Tool - Convert PDF papers to Markdown for AI-native research workflow.
 
-Dual-backend strategy:
-  - docling (default): Fast, CPU/GPU, layout-aware, great for tables, extracts images
-  - nougat: Slow, GPU-intensive, end-to-end Transformer, perfect for heavy LaTeX math
+Multi-backend strategy:
+  - mineru (default): GPU-accelerated, local, highest quality for math/tables
+  - docling (fallback): Fast, CPU/GPU, layout-aware, good for quick previews
+  - glm-ocr (cloud): No GPU needed, uses Zhipu AI cloud API, requires API key
 
 Usage:
-  uv run ingest_paper.py <pdf_path_or_url> [--engine docling|nougat] [--output-dir <path>] [--images-scale <float>]
+  uv run ingest_paper.py <pdf_path_or_url> [--engine mineru|docling|glm-ocr] [--output-dir <path>]
     [--image-format source|png|jpg|jpeg|webp] [--image-quality <1-100>] [--image-lossless] [--force]
 
 Output:
@@ -32,6 +33,37 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, unquote
+
+
+# ============================================================================
+# Environment Loading
+# ============================================================================
+
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
+def load_env_file(path: Path) -> None:
+    """Load environment variables from a .env file."""
+    if not path.exists():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if value and (value[0] == value[-1]) and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key:
+                os.environ.setdefault(key, value)
+    except Exception:
+        return
+
+
+load_env_file(ENV_FILE)
 
 
 # ============================================================================
@@ -1138,6 +1170,236 @@ def convert_with_mineru(
 
 
 # ============================================================================
+# GLM-OCR Backend (Cloud API)
+# ============================================================================
+
+
+def convert_with_glm_ocr(
+    pdf_path: Path,
+    assets_dir: Path,
+    image_format: str,
+    image_quality: int,
+    image_lossless: bool,
+) -> tuple[str, str | None]:
+    """
+    Convert PDF to Markdown using GLM-OCR cloud API (Zhipu AI layout parsing).
+
+    Sends PDF as base64 data URI to the cloud endpoint. No local GPU required.
+    Requires GLM_API_ID and GLM_API_KEY environment variables or paper-ingestion/.env file.
+
+    Limits: PDF <= 50MB, Images <= 10MB, max 100 pages.
+
+    Returns (markdown_content, detected_title).
+    """
+    import base64
+    import requests
+
+    global _conversion_metadata
+
+    # --- Validate API credentials ---
+    api_id = os.environ.get("GLM_API_ID", "").strip()
+    api_key = os.environ.get("GLM_API_KEY", "").strip()
+    if not api_key:
+        output_error(
+            "GLM_API_KEY is not set",
+            "Create paper-ingestion/.env with GLM_API_ID and GLM_API_KEY, "
+            "or set them as environment variables. "
+            "Get your key at https://open.bigmodel.cn",
+        )
+
+    # Build authorization token: id.key format
+    auth_token = f"{api_id}.{api_key}" if api_id else api_key
+
+    # --- Validate file limits ---
+    file_size = pdf_path.stat().st_size
+    if file_size > 50 * 1024 * 1024:
+        output_error(
+            f"PDF too large for GLM-OCR: {file_size / (1024 * 1024):.1f}MB (limit: 50MB)",
+            "Try --engine mineru or --engine docling for large PDFs.",
+        )
+
+    page_count = get_pdf_page_count(pdf_path)
+    if page_count > 100:
+        output_error(
+            f"PDF has {page_count} pages (GLM-OCR limit: 100 pages)",
+            "Try --engine mineru or --engine docling for large PDFs.",
+        )
+
+    # --- Store conversion metadata ---
+    image_format = normalize_image_format(image_format)
+    image_quality = clamp_image_quality(image_quality)
+    _conversion_metadata = {
+        "backend": "glm-ocr",
+        "mode": "cloud",
+        "page_count": page_count,
+        "file_size_mb": round(file_size / (1024 * 1024), 2),
+        "image_format": image_format,
+        "image_quality": image_quality,
+        "image_lossless": image_lossless,
+    }
+
+    # --- Base64 encode the PDF ---
+    pdf_bytes = pdf_path.read_bytes()
+    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+    file_data_uri = f"data:application/pdf;base64,{pdf_b64}"
+
+    # --- Call the API with retry ---
+    url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
+    headers = {
+        "Authorization": auth_token,
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "glm-ocr",
+        "file": file_data_uri,
+    }
+
+    max_retries = 3
+    last_error = None
+    result = None
+
+    for attempt in range(max_retries):
+        try:
+            print(
+                f"GLM-OCR: Sending PDF to cloud API ({file_size / 1024:.0f} KB, "
+                f"{page_count} pages, attempt {attempt + 1}/{max_retries})",
+                file=sys.stderr,
+            )
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=300,  # 5 min timeout for cloud processing
+            )
+
+            if response.status_code == 429:
+                wait_time = 2 ** (attempt + 1)
+                print(f"GLM-OCR: Rate limited, waiting {wait_time}s", file=sys.stderr)
+                time.sleep(wait_time)
+                continue
+
+            if response.status_code != 200:
+                last_error = (
+                    f"GLM-OCR API error: {response.status_code} - "
+                    f"{response.text[:300]}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                output_error(last_error)
+
+            result = response.json()
+            break
+
+        except requests.Timeout:
+            last_error = "GLM-OCR API request timed out (>5 minutes)"
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            output_error(last_error, "The PDF may be too complex. Try a local engine.")
+        except requests.RequestException as e:
+            last_error = f"GLM-OCR API request failed: {e}"
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            output_error(last_error)
+    else:
+        output_error(last_error or "GLM-OCR API failed after all retries")
+
+    # --- Extract markdown from response ---
+    markdown_content = result.get("md_results", "")
+    if not markdown_content:
+        output_error(
+            "GLM-OCR returned empty markdown",
+            "The PDF may be unreadable or in an unsupported format.",
+        )
+
+    # --- Download images referenced in markdown to local assets/ ---
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    image_counter = 0
+    image_map = {}  # old_url -> new_local_path
+
+    img_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+    image_refs = img_pattern.findall(markdown_content)
+
+    for _alt_text, img_url in image_refs:
+        if img_url in image_map:
+            continue  # Already downloaded
+
+        image_counter += 1
+        try:
+            if img_url.startswith("data:"):
+                # Data URI: data:image/png;base64,...
+                if ";base64," in img_url:
+                    header_part, b64data = img_url.split(";base64,", 1)
+                    mime = header_part.split(":", 1)[1] if ":" in header_part else "image/png"
+                    ext_map = {
+                        "image/png": ".png",
+                        "image/jpeg": ".jpg",
+                        "image/webp": ".webp",
+                        "image/gif": ".gif",
+                    }
+                    source_ext = ext_map.get(mime, ".png")
+                    img_bytes = base64.b64decode(b64data)
+                else:
+                    image_counter -= 1
+                    continue
+            elif img_url.startswith(("http://", "https://")):
+                # Remote URL - download
+                img_resp = requests.get(img_url, timeout=30)
+                img_resp.raise_for_status()
+                img_bytes = img_resp.content
+                content_type = img_resp.headers.get("Content-Type", "")
+                if "png" in content_type:
+                    source_ext = ".png"
+                elif "jpeg" in content_type or "jpg" in content_type:
+                    source_ext = ".jpg"
+                elif "webp" in content_type:
+                    source_ext = ".webp"
+                else:
+                    source_ext = Path(urlparse(img_url).path).suffix or ".png"
+            else:
+                # Relative path or unknown scheme - skip
+                image_counter -= 1
+                continue
+
+            target_ext = get_image_extension(
+                image_format, source_ext, default_for_source=".png"
+            )
+            img_name = f"image_{image_counter:03d}{target_ext}"
+            img_path = assets_dir / img_name
+
+            save_image_bytes(
+                img_bytes, img_path, image_format, image_quality, image_lossless
+            )
+            image_map[img_url] = f"./assets/{img_name}"
+
+        except Exception as e:
+            print(
+                f"GLM-OCR: Warning: Failed to download image {image_counter}: {e}",
+                file=sys.stderr,
+            )
+            image_counter -= 1
+
+    # --- Rewrite image paths in markdown ---
+    def replace_img_url(match):
+        alt_text = match.group(1)
+        old_url = match.group(2)
+        if old_url in image_map:
+            return f"![{alt_text}]({image_map[old_url]})"
+        return match.group(0)
+
+    markdown_content = re.sub(
+        r"!\[([^\]]*)\]\(([^)]+)\)",
+        replace_img_url,
+        markdown_content,
+    )
+
+    detected_title = extract_title_from_markdown(markdown_content)
+    return markdown_content, detected_title
+
+
+# ============================================================================
 # File Organization
 # ============================================================================
 
@@ -1240,9 +1502,9 @@ def main():
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["mineru", "docling"],
+        choices=["mineru", "docling", "glm-ocr"],
         default="mineru",
-        help="Conversion engine: mineru (default, highest quality, GPU), docling (fallback, fast)",
+        help="Conversion engine: mineru (default, highest quality, GPU), docling (fallback, fast), glm-ocr (cloud API, no GPU needed)",
     )
     parser.add_argument(
         "--output-dir",
@@ -1323,6 +1585,14 @@ def main():
                 image_quality,
                 image_lossless,
             )
+        elif engine == "glm-ocr":
+            markdown_content, detected_title = convert_with_glm_ocr(
+                pdf_path,
+                temp_assets,
+                image_format,
+                image_quality,
+                image_lossless,
+            )
 
         # Normalize math delimiters to $...$ / $$...$$
         markdown_content = apply_outside_code_blocks(
@@ -1346,8 +1616,8 @@ def main():
             args.force,
         )
 
-        # Move assets to final location (for docling and mineru)
-        if engine in ("docling", "mineru") and temp_assets and temp_assets.exists():
+        # Move assets to final location
+        if temp_assets and temp_assets.exists():
             final_assets = Path(paths["paper_dir"]) / "assets"
             if any(temp_assets.iterdir()):
                 shutil.copytree(temp_assets, final_assets, dirs_exist_ok=True)
@@ -1403,11 +1673,20 @@ def main():
             print(f"  Image Quality: {image_quality}", file=sys.stderr)
             if image_lossless:
                 print("  Image Lossless: true", file=sys.stderr)
+        elif engine == "glm-ocr":
+            meta = get_conversion_metadata()
+            print("  Backend: GLM-OCR (cloud API)", file=sys.stderr)
+            print(f"  Pages: {meta.get('page_count', 'unknown')}", file=sys.stderr)
+            print(f"  File Size: {meta.get('file_size_mb', 'unknown')} MB", file=sys.stderr)
+            print(f"  Image Format: {meta.get('image_format', image_format)}", file=sys.stderr)
+            print(f"  Image Quality: {meta.get('image_quality', image_quality)}", file=sys.stderr)
+            if meta.get("image_lossless", image_lossless):
+                print("  Image Lossless: true", file=sys.stderr)
 
         print(f"  Total Time: {elapsed_time:.2f}s", file=sys.stderr)
 
         # Calculate pages per second if we have page count
-        if engine == "mineru":
+        if engine in ("mineru", "glm-ocr"):
             meta = get_conversion_metadata()
             page_count = meta.get("page_count", 0)
             if page_count > 0 and elapsed_time > 0:

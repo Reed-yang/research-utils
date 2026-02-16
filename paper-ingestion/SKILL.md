@@ -1,6 +1,6 @@
 ---
 name: paper-ingestion
-description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Uses MinerU (GPU) by default, docling as fallback.
+description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Uses MinerU (GPU) by default, docling or GLM-OCR (cloud) as alternatives.
 ---
 
 # Paper Ingestion Tool
@@ -20,6 +20,9 @@ uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2401.12345.pdf"
 
 # Fallback engine (docling, fast but lower quality)
 uv run scripts/ingest_paper.py paper.pdf --engine docling
+
+# Cloud engine (GLM-OCR, no GPU needed, requires API key)
+uv run scripts/ingest_paper.py paper.pdf --engine glm-ocr
 
 # Custom output directory
 uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
@@ -44,6 +47,7 @@ The ingestion script auto-detects the server at `127.0.0.1:8000` and uses it whe
 |----------|--------|--------------|-------|
 | Default (highest quality) | `mineru` | `--extra mineru` | GPU-accelerated, excellent math/tables |
 | Fallback (fast, no GPU) | `docling` | `--extra docling` | Lower quality, good for quick previews |
+| Cloud (no GPU, API) | `glm-ocr` | None (base only) | Cloud API, requires `GLM_API_KEY`, max 100 pages |
 
 ## Output Structure
 
@@ -92,13 +96,34 @@ aliases: []
 {"status": "error", "message": "...", "suggestion": "..."}
 ```
 
+## Cloud Engine Configuration (GLM-OCR)
+
+GLM-OCR uses the Zhipu AI cloud API. Set your API credentials:
+
+```bash
+# Option 1: Environment variables
+export GLM_API_ID=your_id_here
+export GLM_API_KEY=your_key_here
+
+# Option 2: .env file
+cp paper-ingestion/.env.template paper-ingestion/.env
+# Edit .env and add your credentials
+```
+
+Get an API key at https://open.bigmodel.cn
+
+**Limits**: PDF <= 50MB, max 100 pages per document.
+
 ## Error Handling
 
 | Error | Action |
 |-------|--------|
 | Duplicate detected | Remove existing folder or use `--force` |
-| MinerU timeout | Try `--engine docling` |
+| MinerU timeout | Try `--engine docling` or `--engine glm-ocr` |
 | Download failed | Check URL is accessible |
+| GLM-OCR API key missing | Set `GLM_API_ID` and `GLM_API_KEY` in `.env` or environment |
+| GLM-OCR timeout | Check network or try a local engine |
+| GLM-OCR rate limited | Wait and retry (automatic), or reduce request frequency |
 
 ## Image Handling
 

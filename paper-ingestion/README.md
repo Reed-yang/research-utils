@@ -38,6 +38,7 @@ uv sync --all-extras
 | Base | `uv sync` | `pypdf`, `pillow`, `requests` (~7 packages) |
 | MinerU | `uv sync --extra mineru` | + `mineru[pipeline,api]` from local fork (~134 packages, includes torch + CUDA) |
 | Docling | `uv sync --extra docling` | + `docling`, `torch` (~70 packages) |
+| GLM-OCR | `uv sync` | Base only (uses `requests`), needs `GLM_API_ID` + `GLM_API_KEY` |
 | All | `uv sync --all-extras` | Everything (~199 packages) |
 
 > The `mineru` extra installs from the local `mineru-fork/` subtree as an editable dependency. Any changes to the fork code take effect immediately.
@@ -82,6 +83,15 @@ uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2512.05905"
 uv run scripts/ingest_paper.py paper.pdf --engine docling
 ```
 
+### 4. GLM-OCR Engine (Cloud, No GPU)
+
+Uses the Zhipu AI cloud API. No local GPU or heavy dependencies needed.
+
+```bash
+# Requires: GLM_API_ID and GLM_API_KEY set in environment or paper-ingestion/.env
+uv run scripts/ingest_paper.py paper.pdf --engine glm-ocr
+```
+
 ## Output Structure
 
 Papers are organized in timestamped folders:
@@ -112,6 +122,7 @@ Environment variables:
 - `MINERU_API_HOST` / `MINERU_API_PORT`: API endpoint (default: `127.0.0.1:8000`)
 - `MINERU_HYBRID_BATCH_RATIO`: Internal batch size (default: 16). Lower to 8 if OOM.
 - `CUDA_VISIBLE_DEVICES`: GPU selection for server or CLI mode.
+- `GLM_API_ID` / `GLM_API_KEY`: Credentials for GLM-OCR cloud engine (get from https://open.bigmodel.cn). Can also be set in `paper-ingestion/.env`.
 
 ---
 
