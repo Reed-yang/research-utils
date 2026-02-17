@@ -1,6 +1,6 @@
 ---
 name: paper-ingestion
-description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Uses MinerU (GPU) by default, docling or GLM-OCR (cloud) as alternatives.
+description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Uses GLM-OCR (cloud) by default, MinerU (GPU) or docling as alternatives.
 ---
 
 # Paper Ingestion Tool
@@ -12,17 +12,17 @@ Convert PDF research papers to Markdown with image extraction, organized for AI-
 ```bash
 cd paper-ingestion
 
-# From local file (default: mineru engine)
+# From local file (default: glm-ocr cloud engine)
 uv run scripts/ingest_paper.py /path/to/paper.pdf
 
 # From URL
 uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2401.12345.pdf"
 
-# Fallback engine (docling, fast but lower quality)
-uv run scripts/ingest_paper.py paper.pdf --engine docling
+# MinerU engine (highest quality, requires GPU)
+uv run scripts/ingest_paper.py paper.pdf --engine mineru
 
-# Cloud engine (GLM-OCR, no GPU needed, requires API key)
-uv run scripts/ingest_paper.py paper.pdf --engine glm-ocr
+# Docling engine (fast, no GPU, lower quality)
+uv run scripts/ingest_paper.py paper.pdf --engine docling
 
 # Custom output directory
 uv run scripts/ingest_paper.py paper.pdf --output-dir /path/to/readings
@@ -45,9 +45,9 @@ The ingestion script auto-detects the server at `127.0.0.1:8000` and uses it whe
 
 | Scenario | Engine | Extra needed | Notes |
 |----------|--------|--------------|-------|
-| Default (highest quality) | `mineru` | `--extra mineru` | GPU-accelerated, excellent math/tables |
+| Default (cloud, no GPU) | `glm-ocr` | None (base only) | Cloud API, requires `GLM_API_KEY`, max 100 pages |
+| Highest quality (GPU) | `mineru` | `--extra mineru` | GPU-accelerated, excellent math/tables |
 | Fallback (fast, no GPU) | `docling` | `--extra docling` | Lower quality, good for quick previews |
-| Cloud (no GPU, API) | `glm-ocr` | None (base only) | Cloud API, requires `GLM_API_KEY`, max 100 pages |
 
 ## Output Structure
 
@@ -59,8 +59,8 @@ Files organized at `{cwd}/{YYYYMMDD}-{Sanitized_Title}/`:
   full_text.md     # Markdown with YAML frontmatter
   notes.md         # Empty notes file
   assets/          # Extracted images
-    image_001.png
-    image_002.png
+    image_001.webp
+    image_002.webp
 ```
 
 **Naming rules:**
@@ -127,7 +127,7 @@ Get an API key at https://open.bigmodel.cn
 
 ## Image Handling
 
-- **Both engines**: Extract images to `assets/` folder
+- **All engines**: Extract images to `assets/` folder
 - **Markdown references**: `![Fig1](./assets/image_001.webp)` (relative paths)
 - **Syncthing compatible**: Small image files sync across devices
 

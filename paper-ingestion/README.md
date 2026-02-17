@@ -45,51 +45,37 @@ uv sync --all-extras
 
 ## Usage Guide
 
-### 1. Recommended: API Server Mode (Fastest)
+### 1. Default: GLM-OCR Engine (Cloud, No GPU)
 
-For the best performance (10x speedup), run a persistent MinerU server. This loads the heavy ML models once into GPU memory, allowing subsequent papers to be processed in seconds.
-
-**Step 1: Start the Server (Background)**
+Uses the Zhipu AI cloud API. No local GPU or heavy dependencies needed. Requires `GLM_API_ID` and `GLM_API_KEY` in environment or `paper-ingestion/.env`.
 
 ```bash
-# Requires: uv sync --extra mineru
-CUDA_VISIBLE_DEVICES=0 uv run mineru-api --host 127.0.0.1 --port 8000
-```
-
-**Step 2: Ingest Papers**
-
-The script automatically detects if the server is running at `127.0.0.1:8000` and uses it.
-
-```bash
-# Process a paper from URL
+# Process a paper from URL (default engine: glm-ocr)
 uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2512.05905"
 
 # Process a local file
 uv run scripts/ingest_paper.py papers/my_paper.pdf
 ```
 
-### 2. Standard CLI Mode (Fallback)
+### 2. MinerU Engine (Highest Quality, GPU)
 
-If the server is not running, the script falls back to CLI mode. This handles model loading per-run (slower, ~1-2 mins per paper).
+For the best quality, use MinerU with a persistent API server (10x speedup).
 
 ```bash
-uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2512.05905"
+# Start server (requires --extra mineru)
+CUDA_VISIBLE_DEVICES=0 uv run mineru-api --host 127.0.0.1 --port 8000
+
+# Ingest (auto-detects server at 127.0.0.1:8000)
+uv run scripts/ingest_paper.py paper.pdf --engine mineru
 ```
+
+If the server is not running, it falls back to CLI mode (slower, ~1-2 mins per paper).
 
 ### 3. Docling Engine (No GPU)
 
 ```bash
 # Requires: uv sync --extra docling
 uv run scripts/ingest_paper.py paper.pdf --engine docling
-```
-
-### 4. GLM-OCR Engine (Cloud, No GPU)
-
-Uses the Zhipu AI cloud API. No local GPU or heavy dependencies needed.
-
-```bash
-# Requires: GLM_API_ID and GLM_API_KEY set in environment or paper-ingestion/.env
-uv run scripts/ingest_paper.py paper.pdf --engine glm-ocr
 ```
 
 ## Output Structure

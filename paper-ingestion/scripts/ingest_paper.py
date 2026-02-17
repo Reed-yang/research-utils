@@ -3,9 +3,9 @@
 Paper Ingestion Tool - Convert PDF papers to Markdown for AI-native research workflow.
 
 Multi-backend strategy:
-  - mineru (default): GPU-accelerated, local, highest quality for math/tables
-  - docling (fallback): Fast, CPU/GPU, layout-aware, good for quick previews
-  - glm-ocr (cloud): No GPU needed, uses Zhipu AI cloud API, requires API key
+  - glm-ocr (default): Cloud-based, no GPU needed, uses Zhipu AI API, requires API key
+  - mineru: GPU-accelerated, local, highest quality for math/tables
+  - docling: Fast, CPU/GPU, layout-aware, good for quick previews
 
 Usage:
   uv run ingest_paper.py <pdf_path_or_url> [--engine mineru|docling|glm-ocr] [--output-dir <path>]
@@ -1180,6 +1180,7 @@ def convert_with_glm_ocr(
     image_format: str,
     image_quality: int,
     image_lossless: bool,
+    debug: bool = False,
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using GLM-OCR cloud API (Zhipu AI layout parsing).
@@ -1243,68 +1244,90 @@ def convert_with_glm_ocr(
     pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
     file_data_uri = f"data:application/pdf;base64,{pdf_b64}"
 
-    # --- Call the API with retry ---
-    url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
-    headers = {
-        "Authorization": auth_token,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "glm-ocr",
-        "file": file_data_uri,
-    }
+    # --- Call the API (with response caching in debug mode) ---
+    cache_path = pdf_path.with_suffix(".glm-ocr.json")
+    if debug and cache_path.exists():
+        print(
+            f"GLM-OCR: Loading cached response from {cache_path.name}",
+            file=sys.stderr,
+        )
+        result = json.loads(cache_path.read_text(encoding="utf-8"))
+    else:
+        url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
+        headers = {
+            "Authorization": auth_token,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "glm-ocr",
+            "file": file_data_uri,
+        }
 
-    max_retries = 3
-    last_error = None
-    result = None
+        max_retries = 3
+        last_error = None
+        result = None
 
-    for attempt in range(max_retries):
-        try:
-            print(
-                f"GLM-OCR: Sending PDF to cloud API ({file_size / 1024:.0f} KB, "
-                f"{page_count} pages, attempt {attempt + 1}/{max_retries})",
-                file=sys.stderr,
-            )
-            response = requests.post(
-                url,
-                headers=headers,
-                json=payload,
-                timeout=300,  # 5 min timeout for cloud processing
-            )
-
-            if response.status_code == 429:
-                wait_time = 2 ** (attempt + 1)
-                print(f"GLM-OCR: Rate limited, waiting {wait_time}s", file=sys.stderr)
-                time.sleep(wait_time)
-                continue
-
-            if response.status_code != 200:
-                last_error = (
-                    f"GLM-OCR API error: {response.status_code} - "
-                    f"{response.text[:300]}"
+        for attempt in range(max_retries):
+            try:
+                print(
+                    f"GLM-OCR: Sending PDF to cloud API ({file_size / 1024:.0f} KB, "
+                    f"{page_count} pages, attempt {attempt + 1}/{max_retries})",
+                    file=sys.stderr,
                 )
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=payload,
+                    timeout=300,  # 5 min timeout for cloud processing
+                )
+
+                if response.status_code == 429:
+                    wait_time = 2 ** (attempt + 1)
+                    print(
+                        f"GLM-OCR: Rate limited, waiting {wait_time}s",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait_time)
+                    continue
+
+                if response.status_code != 200:
+                    last_error = (
+                        f"GLM-OCR API error: {response.status_code} - "
+                        f"{response.text[:300]}"
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    output_error(last_error)
+
+                result = response.json()
+                break
+
+            except requests.Timeout:
+                last_error = "GLM-OCR API request timed out (>5 minutes)"
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                output_error(
+                    last_error, "The PDF may be too complex. Try a local engine."
+                )
+            except requests.RequestException as e:
+                last_error = f"GLM-OCR API request failed: {e}"
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
                 output_error(last_error)
+        else:
+            output_error(last_error or "GLM-OCR API failed after all retries")
 
-            result = response.json()
-            break
-
-        except requests.Timeout:
-            last_error = "GLM-OCR API request timed out (>5 minutes)"
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-            output_error(last_error, "The PDF may be too complex. Try a local engine.")
-        except requests.RequestException as e:
-            last_error = f"GLM-OCR API request failed: {e}"
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-            output_error(last_error)
-    else:
-        output_error(last_error or "GLM-OCR API failed after all retries")
+        if debug:
+            cache_path.write_text(
+                json.dumps(result, ensure_ascii=False), encoding="utf-8"
+            )
+            print(
+                f"GLM-OCR: Debug: cached response to {cache_path.name}",
+                file=sys.stderr,
+            )
 
     # --- Extract markdown from response ---
     markdown_content = result.get("md_results", "")
@@ -1314,39 +1337,163 @@ def convert_with_glm_ocr(
             "The PDF may be unreadable or in an unsupported format.",
         )
 
-    # --- Download images referenced in markdown to local assets/ ---
+    # --- Extract images from PDF using GLM-OCR bbox coordinates ---
+    #
+    # GLM-OCR returns image refs as: ![alt](page=N,bbox=[x1, y1, x2, y2])
+    # Coordinates use top-left origin in a pixel space whose dimensions
+    # are given by result["data_info"]["pages"][N]["width"/"height"].
+    # We render each needed page at a higher resolution for quality,
+    # then proportionally map and crop the bbox region.
+    # Also handles data URIs and remote URLs as fallback.
+
     assets_dir.mkdir(parents=True, exist_ok=True)
     image_counter = 0
-    image_map = {}  # old_url -> new_local_path
+    image_map = {}  # old_ref -> new_local_path
 
+    # Parse all image references
     img_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
     image_refs = img_pattern.findall(markdown_content)
 
-    for _alt_text, img_url in image_refs:
-        if img_url in image_map:
-            continue  # Already downloaded
+    # Detect bbox-style refs and collect which pages need rendering
+    bbox_pattern = re.compile(
+        r"^page=(\d+),bbox=\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]$"
+    )
+    pages_needed = set()
+    for _alt, ref in image_refs:
+        m = bbox_pattern.match(ref)
+        if m:
+            pages_needed.add(int(m.group(1)))
+
+    # Render needed pages once (lazy, cached by page number)
+    rendered_pages = {}  # page_num -> (pil_image, glm_w, glm_h)
+    glm_pages = result.get("data_info", {}).get("pages", [])
+
+    if pages_needed:
+        try:
+            import pypdfium2 as pdfium
+
+            pdf_doc = pdfium.PdfDocument(str(pdf_path))
+            render_scale = 4.0  # High-quality output (288 DPI)
+
+            for pg_num in sorted(pages_needed):
+                if pg_num >= len(pdf_doc):
+                    print(
+                        f"GLM-OCR: Warning: page {pg_num} out of range, skipping",
+                        file=sys.stderr,
+                    )
+                    continue
+                pg = pdf_doc[pg_num]
+                pg_w_pts = pg.get_width()
+                pg_h_pts = pg.get_height()
+
+                bitmap = pg.render(scale=render_scale)
+                pil_img = bitmap.to_pil()
+
+                # GLM-OCR reference dimensions from API response
+                if pg_num < len(glm_pages):
+                    glm_w = glm_pages[pg_num]["width"]
+                    glm_h = glm_pages[pg_num]["height"]
+                else:
+                    glm_w = round(pg_w_pts * 10 / 3)
+                    glm_h = round(pg_h_pts * 10 / 3)
+                rendered_pages[pg_num] = (pil_img, glm_w, glm_h)
+
+            pdf_doc.close()
+            print(
+                f"GLM-OCR: Rendered {len(rendered_pages)} pages for image extraction",
+                file=sys.stderr,
+            )
+        except ImportError:
+            print(
+                "GLM-OCR: Warning: pypdfium2 not available, "
+                "bbox images will not be extracted",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"GLM-OCR: Warning: Failed to render PDF pages: {e}",
+                file=sys.stderr,
+            )
+
+    # Extract each image
+    for _alt_text, img_ref in image_refs:
+        if img_ref in image_map:
+            continue  # Already processed (dedup)
 
         image_counter += 1
         try:
-            if img_url.startswith("data:"):
-                # Data URI: data:image/png;base64,...
-                if ";base64," in img_url:
-                    header_part, b64data = img_url.split(";base64,", 1)
-                    mime = header_part.split(":", 1)[1] if ":" in header_part else "image/png"
-                    ext_map = {
-                        "image/png": ".png",
-                        "image/jpeg": ".jpg",
-                        "image/webp": ".webp",
-                        "image/gif": ".gif",
-                    }
-                    source_ext = ext_map.get(mime, ".png")
-                    img_bytes = base64.b64decode(b64data)
-                else:
+            m = bbox_pattern.match(img_ref)
+            if m:
+                # --- Bbox reference: crop from rendered page ---
+                pg_num = int(m.group(1))
+                bx1, by1, bx2, by2 = (
+                    int(m.group(2)),
+                    int(m.group(3)),
+                    int(m.group(4)),
+                    int(m.group(5)),
+                )
+
+                if pg_num not in rendered_pages:
                     image_counter -= 1
                     continue
-            elif img_url.startswith(("http://", "https://")):
-                # Remote URL - download
-                img_resp = requests.get(img_url, timeout=30)
+
+                pil_img, glm_w, glm_h = rendered_pages[pg_num]
+                img_w, img_h = pil_img.size
+
+                # Map GLM-OCR coords to our render resolution.
+                # GLM-OCR uses top-left origin, same as image coordinates.
+                sx = img_w / glm_w
+                sy = img_h / glm_h
+                crop_box = (
+                    max(0, round(bx1 * sx)),
+                    max(0, round(by1 * sy)),
+                    min(img_w, round(bx2 * sx)),
+                    min(img_h, round(by2 * sy)),
+                )
+
+                cropped = pil_img.crop(crop_box)
+                if cropped.width < 1 or cropped.height < 1:
+                    image_counter -= 1
+                    continue
+
+                # For bbox crops there is no "source" format — default to png
+                crop_format = "png" if image_format == "source" else image_format
+                target_ext = get_image_extension(
+                    crop_format, ".png", default_for_source=".png"
+                )
+                img_name = f"image_{image_counter:03d}{target_ext}"
+                img_path = assets_dir / img_name
+
+                save_pil_image(
+                    cropped, img_path, crop_format, image_quality, image_lossless
+                )
+                image_map[img_ref] = f"./assets/{img_name}"
+
+            elif img_ref.startswith("data:") and ";base64," in img_ref:
+                # --- Data URI ---
+                header_part, b64data = img_ref.split(";base64,", 1)
+                mime = header_part.split(":", 1)[1] if ":" in header_part else "image/png"
+                ext_map = {
+                    "image/png": ".png", "image/jpeg": ".jpg",
+                    "image/webp": ".webp", "image/gif": ".gif",
+                }
+                source_ext = ext_map.get(mime, ".png")
+                img_bytes = base64.b64decode(b64data)
+
+                target_ext = get_image_extension(
+                    image_format, source_ext, default_for_source=".png"
+                )
+                img_name = f"image_{image_counter:03d}{target_ext}"
+                img_path = assets_dir / img_name
+
+                save_image_bytes(
+                    img_bytes, img_path, image_format, image_quality, image_lossless
+                )
+                image_map[img_ref] = f"./assets/{img_name}"
+
+            elif img_ref.startswith(("http://", "https://")):
+                # --- Remote URL ---
+                img_resp = requests.get(img_ref, timeout=30)
                 img_resp.raise_for_status()
                 img_bytes = img_resp.content
                 content_type = img_resp.headers.get("Content-Type", "")
@@ -1357,41 +1504,41 @@ def convert_with_glm_ocr(
                 elif "webp" in content_type:
                     source_ext = ".webp"
                 else:
-                    source_ext = Path(urlparse(img_url).path).suffix or ".png"
+                    source_ext = Path(urlparse(img_ref).path).suffix or ".png"
+
+                target_ext = get_image_extension(
+                    image_format, source_ext, default_for_source=".png"
+                )
+                img_name = f"image_{image_counter:03d}{target_ext}"
+                img_path = assets_dir / img_name
+
+                save_image_bytes(
+                    img_bytes, img_path, image_format, image_quality, image_lossless
+                )
+                image_map[img_ref] = f"./assets/{img_name}"
+
             else:
-                # Relative path or unknown scheme - skip
                 image_counter -= 1
                 continue
 
-            target_ext = get_image_extension(
-                image_format, source_ext, default_for_source=".png"
-            )
-            img_name = f"image_{image_counter:03d}{target_ext}"
-            img_path = assets_dir / img_name
-
-            save_image_bytes(
-                img_bytes, img_path, image_format, image_quality, image_lossless
-            )
-            image_map[img_url] = f"./assets/{img_name}"
-
         except Exception as e:
             print(
-                f"GLM-OCR: Warning: Failed to download image {image_counter}: {e}",
+                f"GLM-OCR: Warning: Failed to extract image {image_counter}: {e}",
                 file=sys.stderr,
             )
             image_counter -= 1
 
     # --- Rewrite image paths in markdown ---
-    def replace_img_url(match):
+    def replace_img_ref(match):
         alt_text = match.group(1)
-        old_url = match.group(2)
-        if old_url in image_map:
-            return f"![{alt_text}]({image_map[old_url]})"
+        old_ref = match.group(2)
+        if old_ref in image_map:
+            return f"![{alt_text}]({image_map[old_ref]})"
         return match.group(0)
 
     markdown_content = re.sub(
         r"!\[([^\]]*)\]\(([^)]+)\)",
-        replace_img_url,
+        replace_img_ref,
         markdown_content,
     )
 
@@ -1503,8 +1650,8 @@ def main():
         "--engine",
         type=str,
         choices=["mineru", "docling", "glm-ocr"],
-        default="mineru",
-        help="Conversion engine: mineru (default, highest quality, GPU), docling (fallback, fast), glm-ocr (cloud API, no GPU needed)",
+        default="glm-ocr",
+        help="Conversion engine: glm-ocr (default, cloud API, no GPU needed), mineru (highest quality, GPU), docling (fallback, fast)",
     )
     parser.add_argument(
         "--output-dir",
@@ -1522,9 +1669,9 @@ def main():
     parser.add_argument(
         "--image-format",
         type=str,
-        default="source",
+        default="webp",
         choices=["source", "png", "jpg", "jpeg", "webp"],
-        help="Output image format. 'source' keeps original format when available.",
+        help="Output image format. 'webp' (default) gives best compression. 'source' keeps original format.",
     )
     parser.add_argument(
         "--image-quality",
@@ -1541,6 +1688,11 @@ def main():
         "--force",
         action="store_true",
         help="Allow overwriting when a folder with the same title exists",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Keep intermediate files (e.g. GLM-OCR raw JSON response) for debugging.",
     )
 
     args = parser.parse_args()
@@ -1592,6 +1744,7 @@ def main():
                 image_format,
                 image_quality,
                 image_lossless,
+                debug=args.debug,
             )
 
         # Normalize math delimiters to $...$ / $$...$$
