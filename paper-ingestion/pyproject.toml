@@ -5,6 +5,7 @@ description = "Ingest PDF research papers and convert to Markdown"
 requires-python = ">=3.10"
 dependencies = [
     "pypdf>=4.0.0",
+    "pypdfium2>=4.0.0",
     "pillow>=10.0.0",
     "requests>=2.31.0",
 ]

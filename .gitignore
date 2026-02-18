@@ -13,3 +13,4 @@ benchmark.*
 .env
 
 testing/
+output/
