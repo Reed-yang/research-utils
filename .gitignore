@@ -11,3 +11,6 @@ benchmark.*
 *.resolved
 *.out
 .env
+
+testing/
+output/
