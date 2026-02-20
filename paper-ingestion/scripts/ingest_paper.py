@@ -1329,6 +1329,15 @@ def convert_with_glm_ocr(
                 file=sys.stderr,
             )
 
+    # --- Extract usage from response (if available) ---
+    glm_usage = result.get("usage", {})
+    if glm_usage:
+        _conversion_metadata["usage"] = {
+            "prompt_tokens": glm_usage.get("prompt_tokens", 0),
+            "completion_tokens": glm_usage.get("completion_tokens", 0),
+            "total_tokens": glm_usage.get("total_tokens", 0),
+        }
+
     # --- Extract markdown from response ---
     markdown_content = result.get("md_results", "")
     if not markdown_content:
@@ -1777,16 +1786,18 @@ def main():
             shutil.rmtree(temp_assets.parent, ignore_errors=True)
 
         # Output success JSON
-        output_json(
-            {
-                "status": "success",
-                "markdown_path": paths["markdown_path"],
-                "engine_used": engine,
-                "title": paths["title"],
-                "date": paths["date"],
-                "paper_dir": paths["paper_dir"],
-            }
-        )
+        output_data = {
+            "status": "success",
+            "markdown_path": paths["markdown_path"],
+            "engine_used": engine,
+            "title": paths["title"],
+            "date": paths["date"],
+            "paper_dir": paths["paper_dir"],
+        }
+        meta = get_conversion_metadata()
+        if "usage" in meta:
+            output_data["usage"] = meta["usage"]
+        output_json(output_data)
 
     finally:
         # Cleanup temp download
@@ -1831,6 +1842,11 @@ def main():
             print("  Backend: GLM-OCR (cloud API)", file=sys.stderr)
             print(f"  Pages: {meta.get('page_count', 'unknown')}", file=sys.stderr)
             print(f"  File Size: {meta.get('file_size_mb', 'unknown')} MB", file=sys.stderr)
+            usage = meta.get("usage")
+            if usage:
+                print(f"  Prompt Tokens:     {usage.get('prompt_tokens', 0):,}", file=sys.stderr)
+                print(f"  Completion Tokens: {usage.get('completion_tokens', 0):,}", file=sys.stderr)
+                print(f"  Total Tokens:      {usage.get('total_tokens', 0):,}", file=sys.stderr)
             print(f"  Image Format: {meta.get('image_format', image_format)}", file=sys.stderr)
             print(f"  Image Quality: {meta.get('image_quality', image_quality)}", file=sys.stderr)
             if meta.get("image_lossless", image_lossless):

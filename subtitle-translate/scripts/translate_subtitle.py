@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from abc import ABC, abstractmethod
@@ -83,6 +84,12 @@ RETRY_DELAY = 2.0
 CHUNK_MISSING_RETRIES = 3
 MAX_WORKERS = 8
 
+# Pricing: (input_price_per_1K, output_price_per_1K) in USD
+MODEL_PRICING = {
+    "deepseek-chat": (0.00028, 0.00042),  # DeepSeek V3: $0.28/M in, $0.42/M out
+    "tensorblock/gemini-3-flash-preview": (0.0005, 0.003),  # $0.50/M in, $3.00/M out
+}
+
 
 # ============================================================================
 # SRT Data Structures
@@ -96,6 +103,15 @@ class SRTEntry:
     start_time: str
     end_time: str
     text: str  # May contain newlines for multi-line subtitles
+
+
+@dataclass
+class UsageStats:
+    """Accumulated API token usage."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    api_calls: int = 0
 
 
 @dataclass
@@ -198,6 +214,8 @@ class OpenAICompatibleBackend(LLMBackend):
         self.base_url = base_url
         self.model = model
         self.max_chars_per_chunk = max_chars_per_chunk
+        self._usage_lock = threading.Lock()
+        self._usage = UsageStats()
 
     def translate(self, text: str, target_lang: str, context: str | None = None) -> TranslationResult:
         """Translate text using OpenAI-compatible chat API."""
@@ -239,6 +257,12 @@ CRITICAL RULES:
                     max_tokens=4096,
                 )
                 translated = response.choices[0].message.content
+                if response.usage:
+                    with self._usage_lock:
+                        self._usage.prompt_tokens += response.usage.prompt_tokens or 0
+                        self._usage.completion_tokens += response.usage.completion_tokens or 0
+                        self._usage.total_tokens += response.usage.total_tokens or 0
+                        self._usage.api_calls += 1
                 return TranslationResult(text=translated, success=True)
 
             except Exception as e:
@@ -250,6 +274,28 @@ CRITICAL RULES:
                     success=False,
                     error=f"Translation failed after {MAX_RETRIES} attempts: {e}"
                 )
+
+    def get_usage(self) -> UsageStats:
+        """Return accumulated usage stats (thread-safe snapshot)."""
+        with self._usage_lock:
+            return UsageStats(
+                prompt_tokens=self._usage.prompt_tokens,
+                completion_tokens=self._usage.completion_tokens,
+                total_tokens=self._usage.total_tokens,
+                api_calls=self._usage.api_calls,
+            )
+
+    def estimate_cost(self) -> float | None:
+        """Estimate cost in USD based on model pricing."""
+        pricing = MODEL_PRICING.get(self.model)
+        if not pricing:
+            return None
+        input_price, output_price = pricing
+        usage = self.get_usage()
+        return round(
+            (usage.prompt_tokens * input_price + usage.completion_tokens * output_price) / 1000,
+            6,
+        )
 
 
 class TensorBlockBackend(OpenAICompatibleBackend):
@@ -718,15 +764,41 @@ def main():
 
     print(f"Translation complete in {elapsed:.1f}s", file=sys.stderr)
 
+    # Token usage summary
+    usage = backend.get_usage()
+    cost = backend.estimate_cost()
+
+    print(f"\n{'='*50}", file=sys.stderr)
+    print("Token Usage Summary", file=sys.stderr)
+    print(f"{'='*50}", file=sys.stderr)
+    print(f"  API Calls:         {usage.api_calls}", file=sys.stderr)
+    print(f"  Prompt Tokens:     {usage.prompt_tokens:,}", file=sys.stderr)
+    print(f"  Completion Tokens: {usage.completion_tokens:,}", file=sys.stderr)
+    print(f"  Total Tokens:      {usage.total_tokens:,}", file=sys.stderr)
+    if cost is not None:
+        print(f"  Estimated Cost:    ${cost:.4f} USD", file=sys.stderr)
+    else:
+        print(f"  Estimated Cost:    (pricing not available for {backend.model})", file=sys.stderr)
+    print(f"{'='*50}", file=sys.stderr)
+
     # Output success JSON
-    output_json({
+    result_data = {
         "status": "success",
         "output_path": str(output_path),
         "backend": args.backend,
         "target_lang": args.target_lang,
         "entries_translated": len(translated_entries),
         "elapsed_seconds": round(elapsed, 1),
-    })
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+            "api_calls": usage.api_calls,
+        },
+    }
+    if cost is not None:
+        result_data["estimated_cost_usd"] = cost
+    output_json(result_data)
 
 
 if __name__ == "__main__":
