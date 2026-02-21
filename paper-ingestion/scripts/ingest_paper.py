@@ -1617,7 +1617,6 @@ source_pdf: reference.pdf
 conversion_engine: {engine}
 tags:
   - paper
-  - inbox
 aliases: []
 ---
 

@@ -3,100 +3,169 @@ name: summary
 description: This skill should be used when providing concise summaries of research paper text. Use for quickly understanding the core content, arguments, and contributions of paper sections targeting top-tier computer science conferences.
 ---
 
-# Academic Text Summarizer
+# Paper Summary Skill
 
-Generate concise summaries of research paper text that capture main arguments, key information, and primary takeaways while maintaining technical accuracy.
+Generate structured summaries of research papers with keyword extraction. Reads ingested paper markdown, produces full-paper and section-level summaries, and backfills extracted keywords into YAML frontmatter tags.
 
 ## When to Use This Skill
 
-- Summarizing research paper sections for quick understanding
-- Extracting core arguments and claims from dense technical text
-- Creating concise overviews of paper contributions
-- Understanding the main message of a paragraph or section
+- Summarizing a research paper after ingestion for quick understanding
+- Extracting core arguments, contributions, and key findings
+- Generating keywords for paper indexing and retrieval
 - Preparing summaries for paper reviews or presentations
+- As a follow-up step after `paper-ingestion`
 
-## Summary Goals
+## Pipeline Context
 
-Create a summary that captures:
+Typical workflow: `paper-ingestion` → **`summary`** → `paper-translate` / `paper-validator`
 
-1. **Main argument(s) or claims** being made
-2. **Key pieces of information or evidence** presented
-3. **Primary takeaway message** a reader should understand
+Input: A paper directory produced by `paper-ingestion`, containing `full_text.md` (and optionally `full_text_zh.md` after translation).
+
+## Default Behavior
+
+By default, produce **Full Paper Summary** only — a structured overview of the entire paper (concise, 1-3 sentences per section).
+
+**Section-by-Section Summary** is available on request but not produced by default.
+
+## Language Settings
+
+- **Default output language**: Chinese (中文)
+- Can be specified as English by the user
+- **Chinese mode rules**:
+  - Technical terms and proper nouns remain in English (e.g., "Transformer", "attention 机制", "MoE 架构")
+  - Paper titles remain in original language
+- **Keywords are always in English** regardless of output language
+
+## Workflow
+
+Follow these steps systematically:
+
+### Step 1: Locate Paper Files
+
+- User provides a paper directory path or `full_text.md` path
+- Confirm the directory contains `full_text.md`
+- Check if `full_text_zh.md` exists (for keyword backfill only)
+
+### Step 2: Read Paper Content
+
+- Use the **Read** tool to load `full_text.md` (the English original)
+- Only read `full_text.md` — do NOT read `full_text_zh.md` for summarization
+
+### Step 3: Generate Summary
+
+- Produce Full Paper Summary and Section-by-Section Summary (see Output Format below)
+- Follow the Language Settings above
+
+### Step 4: Extract Keywords
+
+- Extract at least 4 keywords from the paper (typically 4-8)
+- Follow the Keyword Extraction Guidelines below
+- Include keywords in the summary output
+
+### Step 5: Write Summary to notes.md
+
+- Use the **Write** tool to save the complete summary output (Full Paper Summary + Section Summary) into `notes.md` in the same paper directory
+- `notes.md` is created empty by `paper-ingestion` — this step fills it with the summary content
+
+### Step 6: Backfill Keywords to Tags
+
+- Use the **Edit** tool to append keywords to the `tags:` list in `full_text.md` YAML frontmatter
+- If `full_text_zh.md` exists, append the same keywords to its `tags:` list
+- See Backfill Rules below for details
+
+## Output Format — Full Paper Summary
+
+```
+# Paper Summary: {Title}
+
+## Problem
+[Core problem being addressed, 1-3 sentences]
+
+## Method
+[Key approach and techniques, 2-5 sentences]
+
+## Key Results
+[Main experimental findings, 2-4 sentences]
+
+## Contributions
+- [Contribution 1]
+- [Contribution 2]
+- ...
+
+## Limitations
+[Main limitations and shortcomings, 1-3 sentences]
+
+## Keywords
+keyword1, keyword2, keyword3, keyword4, ...
+```
+
+## Output Format — Section Summary
+
+Summarize each major section in order of appearance:
+
+```
+# Section Summaries
+
+### {Section Name}
+[2-5 sentences capturing the essential content of this section]
+
+### {Section Name}
+[2-5 sentences]
+
+...
+```
+
+## Keyword Extraction Guidelines
+
+- **Quantity**: At least 4, typically 4-8
+- **Coverage levels** (include a mix):
+  - Domain-level (broad): e.g., `computer vision`, `NLP`
+  - Method-level: e.g., `diffusion model`, `RL`
+  - Technique-level (specific): e.g., `flash attention`, `RoPE`
+  - Task/application-level: e.g., `image generation`, `code completion`
+- **Abbreviations**: Use widely recognized abbreviations directly (LLM, MoE, GAN, RL, NLP, CV, etc.); keep full names for uncommon or domain-specific terms — do not abbreviate arbitrarily
+- **Format**: English, lowercase (capitalize proper nouns and abbreviations)
+- **Priority**: Paper's own keywords > key concepts from abstract > core terms from full text
+
+## Keyword Backfill Rules
+
+Append extracted keywords to the `tags:` YAML list, before `aliases:`.
+
+**Before backfill:**
+```yaml
+tags:
+  - paper
+aliases: []
+```
+
+**After backfill:**
+```yaml
+tags:
+  - paper
+  - LLM
+  - MoE
+  - inference optimization
+  - transformer architecture
+aliases: []
+```
+
+**Rules:**
+- Use Edit tool to replace the `tags:` block (from `tags:` through the line before `aliases:`)
+- If `tags:` already contains entries beyond `paper`, assume keywords were already backfilled — skip
+- If `full_text_zh.md` does not exist, skip it silently
+- Do not modify any content outside YAML frontmatter
 
 ## Summary Requirements
 
-Follow these guidelines for effective summaries:
-
-### Conciseness
-- Focus on core content only
-- Eliminate unnecessary details
-- Keep summaries brief but complete
-
-### Technical Accuracy
-- Preserve precise technical terminology
-- Maintain accuracy of claims and findings
-- Do not oversimplify complex concepts
-
-### Clarity
-- Use clear, precise language
-- Make the summary self-contained when possible
-- Avoid ambiguous phrasing
-
-### Content Focus
-- Highlight key contributions or findings
-- Emphasize novel aspects or important results
-- Capture the "so what?" of the text
-
-## Output Format
-
-Provide the summary in two parts:
-
-### 1. Summary
-A concise paragraph (2-5 sentences typically) that captures the essential content.
-
-### 2. Explanation
-A brief explanation (1-2 sentences) of how the summary encapsulates the core message of the original text.
-
-## Target Audience
-
-Graduate students, professors, and researchers in computer science who need quick understanding of technical and systems research content.
-
-## Example Structure
-
-```
-**Summary:**
-[2-5 sentences capturing the main argument, key information, and primary takeaway]
-
-**Explanation:**
-[1-2 sentences explaining how this summary represents the core message]
-```
-
-## Guidelines for Different Text Types
-
-### Abstract or Introduction
-- Focus on problem statement, approach, and key results
-- Highlight main contributions
-
-### Related Work
-- Capture how prior work relates to current paper
-- Note key differences or gaps being addressed
-
-### Methodology/Design
-- Summarize core approach and key design decisions
-- Highlight novel techniques or mechanisms
-
-### Evaluation
-- Focus on main findings and key results
-- Note important performance characteristics
-
-### Conclusion
-- Capture main achievements and implications
-- Note future directions if significant
+- **Conciseness**: Focus on core content, eliminate unnecessary details
+- **Technical accuracy**: Preserve precise terminology, do not oversimplify
+- **Clarity**: Use clear, precise, self-contained language
+- **Content focus**: Highlight key contributions, novel aspects, and the "so what?"
 
 ## Important Constraints
 
-- Maintain technical precision - do not dumb down
-- Avoid editorializing or adding opinions
-- Stay faithful to the original text's meaning
-- Do not introduce information not in the source text
-- Keep language appropriate for academic audience
+- Do not introduce information not present in the source text
+- Do not editorialize or add opinions
+- Maintain technical precision appropriate for academic audience
+- Only backfill keywords when producing a full paper summary (not for section-only requests)
+- Preserve all existing YAML frontmatter fields when editing
