@@ -79,7 +79,6 @@ source_pdf: reference.pdf
 conversion_engine: mineru
 tags:
   - paper
-  - inbox
 aliases: []
 ---
 ```
@@ -156,3 +155,5 @@ uv sync --all-extras
 ```
 
 > **Note:** `mineru` is installed as an editable dependency from the local `mineru-fork/` subtree. Changes to the fork take effect immediately without reinstalling.
+
+> **Next step:** Use the `summary` skill to generate a structured summary and extract keywords for the ingested paper.
