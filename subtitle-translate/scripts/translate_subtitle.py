@@ -36,7 +36,9 @@ from pathlib import Path
 # Configuration
 # ============================================================================
 
-ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+_SCRIPT_DIR = Path(__file__).resolve().parents[1]
+_ROOT_ENV = _SCRIPT_DIR.parent / ".env"
+_LOCAL_ENV = _SCRIPT_DIR / ".env"
 
 
 def load_env_file(path: Path) -> None:
@@ -61,7 +63,10 @@ def load_env_file(path: Path) -> None:
         return
 
 
-load_env_file(ENV_FILE)
+# Root .env takes priority (loaded first → setdefault locks the value),
+# then local .env fills in any remaining keys.
+load_env_file(_ROOT_ENV)
+load_env_file(_LOCAL_ENV)
 
 # API Keys from environment
 TENSORBLOCK_API_KEY = os.environ.get("TENSORBLOCK_API_KEY", "")
