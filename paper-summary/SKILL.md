@@ -119,17 +119,17 @@ Summarize each major section in order of appearance:
 
 - **Quantity**: At least 4, typically 4-8
 - **Coverage levels** (include a mix):
-  - Domain-level (broad): e.g., `computer vision`, `NLP`
-  - Method-level: e.g., `diffusion model`, `RL`
-  - Technique-level (specific): e.g., `flash attention`, `RoPE`
-  - Task/application-level: e.g., `image generation`, `code completion`
+  - Domain-level (broad): e.g., `computer-vision`, `NLP`
+  - Method-level: e.g., `diffusion-model`, `RL`
+  - Technique-level (specific): e.g., `flash-attention`, `RoPE`
+  - Task/application-level: e.g., `image-generation`, `code-completion`
 - **Abbreviations**: Use widely recognized abbreviations directly (LLM, MoE, GAN, RL, NLP, CV, etc.); keep full names for uncommon or domain-specific terms — do not abbreviate arbitrarily
-- **Format**: English, lowercase (capitalize proper nouns and abbreviations)
+- **Format**: English, lowercase (capitalize proper nouns and abbreviations). **Tags MUST NOT contain spaces — use hyphens (`-`) to connect multi-word tags** (e.g., `diffusion-transformer`, `reward-hacking`, `text-to-video`). This is required for Obsidian tag compatibility.
 - **Priority**: Paper's own keywords > key concepts from abstract > core terms from full text
 
 ## Keyword Backfill Rules
 
-Append extracted keywords to the `tags:` YAML list, before `aliases:`.
+"Backfill" means appending extracted keywords into the `tags:` list in the YAML frontmatter of `full_text.md` (and `full_text_zh.md` if it exists). Keywords are inserted before the `aliases:` line.
 
 **Before backfill:**
 ```yaml
@@ -144,12 +144,14 @@ tags:
   - paper
   - LLM
   - MoE
-  - inference optimization
-  - transformer architecture
+  - inference-optimization
+  - transformer-architecture
 aliases: []
 ```
 
 **Rules:**
+- **Backfill target**: The `tags:` block inside the YAML frontmatter of `full_text.md` (and `full_text_zh.md` if it exists)
+- **No spaces in tags**: All tags MUST use hyphens (`-`) instead of spaces (e.g., `diffusion-transformer`, NOT `diffusion transformer`). Tags containing spaces will not be recognized by Obsidian.
 - Use Edit tool to replace the `tags:` block (from `tags:` through the line before `aliases:`)
 - If `tags:` already contains entries beyond `paper`, assume keywords were already backfilled — skip
 - If `full_text_zh.md` does not exist, skip it silently
