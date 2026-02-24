@@ -10,13 +10,14 @@ research-utils/             ← project root
 ├── paper-translate/        ← Markdown paper translation (Python script)
 ├── paper-summary/          ← Structured summarization (SKILL.md only, Claude built-in)
 ├── paper-validator/        ← Paper review (SKILL.md only, Claude built-in)
-└── subtitle-translate/     ← SRT subtitle translation (Python script)
+├── subtitle-translate/     ← SRT subtitle translation (Python script)
+└── claude-sync/            ← Cross-device ~/.claude sync with conflict resolution (SKILL.md only, Claude built-in)
 ```
 
 ### Two Types of Skills
 
 - **Script-based** (paper-ingestion, paper-translate, subtitle-translate): have a `scripts/` directory, executed via `uv run`, require API keys
-- **Built-in** (paper-summary, paper-validator): contain only SKILL.md, executed directly by Claude, no external dependencies
+- **Built-in** (paper-summary, paper-validator, claude-sync): contain only SKILL.md, executed directly by Claude, no external dependencies
 
 ## Standard Workflow
 

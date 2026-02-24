@@ -30,6 +30,7 @@ paper-ingestion ──→ full_text.md + assets/
 | **paper-summary** | Structured summary + keyword extraction + tag backfill | Claude (built-in skill) |
 | **paper-validator** | Peer-review style critique targeting top-tier conferences | Claude (built-in skill) |
 | **subtitle-translate** | SRT subtitle translation, preserving timestamps | DeepSeek / TensorBlock |
+| **claude-sync** | Cross-device ~/.claude sync with interactive conflict resolution | claude-sync CLI (built-in skill) |
 
 ## Why DeepSeek
 
@@ -93,7 +94,9 @@ research-utils/
 │   └── SKILL.md
 ├── paper-validator/       # Paper review
 │   └── SKILL.md
-└── subtitle-translate/    # Subtitle translation
-    ├── scripts/
+├── subtitle-translate/    # Subtitle translation
+│   ├── scripts/
+│   └── SKILL.md
+└── claude-sync/           # Cross-device sync with conflict resolution
     └── SKILL.md
 ```
