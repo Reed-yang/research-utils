@@ -11,7 +11,9 @@ research-utils/             ← project root
 ├── paper-summary/          ← Structured summarization (SKILL.md only, Claude built-in)
 ├── paper-validator/        ← Paper review (SKILL.md only, Claude built-in)
 ├── subtitle-translate/     ← SRT subtitle translation (Python script)
-└── claude-sync/            ← Cross-device ~/.claude sync with conflict resolution (SKILL.md only, Claude built-in)
+├── claude-sync/            ← Cross-device ~/.claude sync with conflict resolution (SKILL.md only, Claude built-in)
+├── atom-commit/            ← Atomic git commits with professional messages (SKILL.md only, Claude built-in)
+└── afk/                    ← Autonomous task execution until all planned work is done (SKILL.md only, Claude built-in)
 ```
 
 ### Two Types of Skills

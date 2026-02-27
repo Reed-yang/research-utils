@@ -31,6 +31,8 @@ paper-ingestion ──→ full_text.md + assets/
 | **paper-validator** | Peer-review style critique targeting top-tier conferences | Claude (built-in skill) |
 | **subtitle-translate** | SRT subtitle translation, preserving timestamps | DeepSeek / TensorBlock |
 | **claude-sync** | Cross-device ~/.claude sync with interactive conflict resolution | claude-sync CLI (built-in skill) |
+| **atom-commit** | Atomic git commits with professional Conventional Commits messages | Claude (built-in skill) |
+| **afk** | Autonomous task execution — complete all planned work unattended | Claude (built-in skill) |
 
 ## Why DeepSeek
 
@@ -97,6 +99,10 @@ research-utils/
 ├── subtitle-translate/    # Subtitle translation
 │   ├── scripts/
 │   └── SKILL.md
-└── claude-sync/           # Cross-device sync with conflict resolution
+├── claude-sync/           # Cross-device sync with conflict resolution
+│   └── SKILL.md
+├── atom-commit/           # Atomic git commits with professional messages
+│   └── SKILL.md
+└── afk/                   # Autonomous task execution until all work is done
     └── SKILL.md
 ```
