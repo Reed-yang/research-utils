@@ -16,3 +16,11 @@ testing/
 output/
 
 .history/
+.translate_cache.json
+.translate_cache.json.tmp
+benchmark-results
+
+findings.md
+task_plan.md
+progress.md
+docs/
