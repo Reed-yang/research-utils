@@ -298,9 +298,10 @@ RULES:
    - Citation references like [1], [17]
    - Link URLs (translate link text only)
    - Author names, variable names, technical identifiers
-3. Maintain the exact same paragraph structure
-4. Use accurate academic/technical terminology
-5. Output ONLY the translated text, no explanations"""
+3. Do NOT add LaTeX $ wrapping to text that is not already in LaTeX notation. If the source uses plain Unicode symbols (α, β, ∇) without $, keep them as-is without wrapping.
+4. Maintain the exact same paragraph structure
+5. Use accurate academic/technical terminology
+6. Output ONLY the translated text, no explanations"""
 
         messages = []
         if context:
@@ -316,7 +317,7 @@ RULES:
                 response = client.chat.completions.create(
                     model=self.model,
                     messages=messages,
-                    temperature=0.3,
+                    temperature=0.2,
                     max_tokens=8192,
                 )
                 translated = response.choices[0].message.content
@@ -526,7 +527,11 @@ class MarkdownTranslator:
         return headings
 
     def _strip_references_section(self, text: str) -> tuple[str, bool]:
-        """Remove REFERENCES/BIBLIOGRAPHY section before translation."""
+        """Remove REFERENCES/BIBLIOGRAPHY section before translation.
+
+        Only strips the References section itself. Preserves any headings
+        that follow (appendices, supplementary material) regardless of level.
+        """
         lines = text.splitlines()
         headings = self._collect_headings(text)
 
@@ -537,11 +542,12 @@ class MarkdownTranslator:
         for idx, (start_line, _end_line, level, heading_text) in enumerate(headings):
             if not self._is_references_heading(heading_text):
                 continue
+            # End at the very next heading of ANY level (not just same-or-higher).
+            # This preserves appendices that follow References even as sub-sections.
             end_line = len(lines)
-            for next_start, _next_end, next_level, _ in headings[idx + 1:]:
-                if next_level <= level:
-                    end_line = next_start
-                    break
+            for next_start, _next_end, _next_level, _ in headings[idx + 1:]:
+                end_line = next_start
+                break
             if start_line < end_line:
                 ranges.append((start_line, end_line))
 
@@ -804,14 +810,21 @@ class MarkdownTranslator:
         issues: list[str] = []
         hard_fail = False
 
-        # Check 1: Inline $ count (hard failure if mismatch > 2)
+        # Check 1: Inline $ count
+        # Only hard-fail on $ count DECREASE (content corruption).
+        # $ count INCREASE is a soft warning (LLM wrapping Unicode in LaTeX).
         orig_dollars = self._count_inline_dollars(original)
         trans_dollars = self._count_inline_dollars(translated)
-        if abs(orig_dollars - trans_dollars) > 2:
+        dollar_diff = trans_dollars - orig_dollars
+        if dollar_diff < -2:
             issues.append(
-                f"inline $ mismatch: orig={orig_dollars} trans={trans_dollars}"
+                f"inline $ lost: orig={orig_dollars} trans={trans_dollars}"
             )
             hard_fail = True
+        elif dollar_diff > 2:
+            issues.append(
+                f"inline $ added (cosmetic): orig={orig_dollars} trans={trans_dollars} (+{dollar_diff})"
+            )
 
         # Check 2: Heading count (hard failure if any mismatch)
         orig_headings = self._count_headings(original)
@@ -850,6 +863,74 @@ class MarkdownTranslator:
     def _log_chunk(self, chunk_index: int, message: str) -> None:
         print(f"  Chunk {chunk_index + 1}: {message}", file=sys.stderr)
 
+    @staticmethod
+    def _length_ratio(original: str, translated: str) -> float:
+        """Compute length ratio of translated vs original."""
+        return len(translated) / len(original) if len(original) > 0 else 0.0
+
+    def _split_by_headings_and_translate(
+        self,
+        chunk_text: str,
+        chunk_index: int,
+        context: str | None,
+    ) -> TranslationResult | None:
+        """Last-resort recovery for catastrophically truncated chunks.
+
+        Splits the chunk at heading boundaries and translates each section
+        independently, then merges. Returns None if splitting is not possible
+        or if the merged result is still catastrophically short.
+        """
+        # Find heading positions in the chunk
+        lines = chunk_text.split('\n')
+        heading_positions = []
+        for i, line in enumerate(lines):
+            if re.match(r'^#{1,6}\s', line):
+                heading_positions.append(i)
+
+        if len(heading_positions) <= 1:
+            return None  # Nothing to split on
+
+        self._log_chunk(chunk_index,
+            f"heading-split recovery: splitting at {len(heading_positions)} headings")
+
+        # Split into sub-sections at heading boundaries
+        sections: list[str] = []
+        for j, pos in enumerate(heading_positions):
+            end = heading_positions[j + 1] if j + 1 < len(heading_positions) else len(lines)
+            section = '\n'.join(lines[pos:end]).strip()
+            if section:
+                sections.append(section)
+
+        # Also include any content before the first heading
+        if heading_positions[0] > 0:
+            pre_content = '\n'.join(lines[:heading_positions[0]]).strip()
+            if pre_content:
+                sections.insert(0, pre_content)
+
+        # Translate each section independently
+        translated_parts: list[str] = []
+        for i, section in enumerate(sections):
+            sub_result = self.backend.translate(section, self.target_lang, context)
+            if sub_result.success and sub_result.text:
+                translated_parts.append(sub_result.text)
+                if hasattr(self, '_retry_count'):
+                    self._retry_count += 1
+            else:
+                self._log_chunk(chunk_index,
+                    f"heading-split section {i+1}/{len(sections)} failed, using original")
+                translated_parts.append(section)  # Fallback to original
+
+        merged = '\n\n'.join(translated_parts)
+        ratio = self._length_ratio(chunk_text, merged)
+        if ratio < 0.2:
+            self._log_chunk(chunk_index,
+                f"heading-split recovery still catastrophic (ratio {ratio:.2f})")
+            return None
+
+        self._log_chunk(chunk_index,
+            f"heading-split recovery successful (ratio {ratio:.2f}, {len(sections)} sections)")
+        return TranslationResult(text=merged, success=True)
+
     def _translate_chunk(
         self,
         chunk_text: str,
@@ -871,6 +952,10 @@ class MarkdownTranslator:
             issue_str = "; ".join(issues)
             if hard_fail:
                 self._log_chunk(chunk_index, f"validation hard fail: {issue_str}")
+                # Track all candidates for best-effort selection
+                candidates: list[tuple[float, TranslationResult]] = [
+                    (self._length_ratio(chunk_text, result.text or ""), result),
+                ]
                 # Retry with sub-chunks
                 for retry in range(1, self.chunk_missing_retries + 1):
                     if hasattr(self, '_retry_count'):
@@ -878,7 +963,7 @@ class MarkdownTranslator:
                     # Split chunk and retry each half
                     paragraphs = re.split(r'\n\n+', chunk_text)
                     if len(paragraphs) <= 1:
-                        self._log_chunk(chunk_index, f"retry {retry}: cannot split further, accepting")
+                        self._log_chunk(chunk_index, f"retry {retry}: cannot split further")
                         break
                     mid = len(paragraphs) // 2
                     sub_a = '\n\n'.join(paragraphs[:mid])
@@ -894,11 +979,32 @@ class MarkdownTranslator:
                             self._log_chunk(chunk_index, f"ok after retry {retry}")
                             return TranslationResult(text=merged, success=True)
                         self._log_chunk(chunk_index, f"retry {retry} still failing: {'; '.join(retry_issues)}")
+                        candidates.append(
+                            (self._length_ratio(chunk_text, merged), TranslationResult(text=merged, success=True)),
+                        )
                     else:
                         err = result_a.error or result_b.error or "sub-chunk failed"
                         self._log_chunk(chunk_index, f"retry {retry} sub-chunk API error: {err}")
-                # Accept best-effort after retries exhausted
-                self._log_chunk(chunk_index, "accepting best-effort after retries")
+                # Select best candidate by length ratio closest to ideal (0.6 for zh)
+                best_ratio, best_result = max(candidates, key=lambda c: c[0])
+                if best_ratio < 0.3:
+                    # Catastrophic truncation — try heading-based split as last resort
+                    heading_split = self._split_by_headings_and_translate(
+                        chunk_text, chunk_index, context,
+                    )
+                    if heading_split is not None:
+                        return heading_split
+                    self._log_chunk(
+                        chunk_index,
+                        f"CRITICAL: best-effort length ratio {best_ratio:.2f} < 0.3 — catastrophic truncation",
+                    )
+                else:
+                    self._log_chunk(
+                        chunk_index,
+                        f"accepting best-effort (length ratio {best_ratio:.2f}, "
+                        f"{len(candidates)} candidates)",
+                    )
+                return best_result
             else:
                 self._log_chunk(chunk_index, f"validation warning: {issue_str}")
         else:
@@ -1135,9 +1241,21 @@ class MarkdownTranslator:
         timing.cached_chunks = cached_count
         print(f"Translating {len(chunk_texts)} chunks ({cached_count} cached)...", file=sys.stderr)
 
-        # 6. Translate chunks in parallel
+        # 6. Translate chunks with context overlap
+        # Each chunk receives the last 2 lines of the previous chunk's source
+        # as additional context to maintain cross-chunk coherence.
         api_start = time.time()
         self._retry_count = 0
+
+        # Build per-chunk context with overlap from previous chunk source
+        chunk_contexts: list[str | None] = [context] * len(chunk_texts)
+        for i in range(1, len(chunk_texts)):
+            prev_lines = chunk_texts[i - 1].strip().split('\n')
+            overlap = '\n'.join(prev_lines[-2:]) if len(prev_lines) >= 2 else prev_lines[-1] if prev_lines else ''
+            if overlap and context:
+                chunk_contexts[i] = f"{context}\n\nPreceding text (for continuity):\n{overlap}"
+            elif overlap:
+                chunk_contexts[i] = f"Preceding text (for continuity):\n{overlap}"
 
         futures: dict = {}
         pending_count = sum(1 for c in translated_chunks if c is None)
@@ -1158,7 +1276,7 @@ class MarkdownTranslator:
                     self._translate_chunk,
                     chunk_text,
                     i,
-                    context,
+                    chunk_contexts[i],
                 )
                 futures[future] = i
 
