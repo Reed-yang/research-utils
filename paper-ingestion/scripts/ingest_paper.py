@@ -367,6 +367,16 @@ def is_url(path: str) -> bool:
     return parsed.scheme in ("http", "https")
 
 
+def normalize_arxiv_url(url: str) -> str:
+    """Convert arxiv abstract URL to PDF URL.
+
+    https://arxiv.org/abs/2401.12345 -> https://arxiv.org/pdf/2401.12345
+    https://arxiv.org/abs/2401.12345v2 -> https://arxiv.org/pdf/2401.12345v2
+    """
+    import re
+    return re.sub(r"arxiv\.org/abs/", "arxiv.org/pdf/", url)
+
+
 def download_pdf(url: str) -> Path:
     """Download PDF from URL to a temporary file."""
     import requests
@@ -1186,11 +1196,15 @@ def convert_with_glm_ocr(
     image_quality: int,
     image_lossless: bool,
     debug: bool = False,
+    source_url: str | None = None,
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using GLM-OCR cloud API (Zhipu AI layout parsing).
 
-    Sends PDF as base64 data URI to the cloud endpoint. No local GPU required.
+    When source_url is provided (a public HTTP/HTTPS URL), it is passed directly
+    to the API — no local download or base64 encoding needed. This is the preferred
+    path because the GLM-OCR API no longer accepts base64 data URIs.
+
     Requires GLM_API_ID and GLM_API_KEY environment variables or paper-ingestion/.env file.
 
     Limits: PDF <= 50MB, Images <= 10MB, max 100 pages.
@@ -1244,10 +1258,18 @@ def convert_with_glm_ocr(
         "image_lossless": image_lossless,
     }
 
-    # --- Base64 encode the PDF ---
-    pdf_bytes = pdf_path.read_bytes()
-    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
-    file_data_uri = f"data:application/pdf;base64,{pdf_b64}"
+    # --- Determine file value for API: prefer URL (API no longer accepts base64) ---
+    if source_url:
+        file_value = source_url
+        print(
+            f"GLM-OCR: Using source URL directly (skipping base64 encoding)",
+            file=sys.stderr,
+        )
+    else:
+        # Fallback: base64 encode local file (may fail if API rejects data URIs)
+        pdf_bytes = pdf_path.read_bytes()
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+        file_value = f"data:application/pdf;base64,{pdf_b64}"
 
     # --- Call the API (with response caching in debug mode) ---
     cache_path = pdf_path.with_suffix(".glm-ocr.json")
@@ -1265,7 +1287,7 @@ def convert_with_glm_ocr(
         }
         payload = {
             "model": "glm-ocr",
-            "file": file_data_uri,
+            "file": file_value,
         }
 
         max_retries = 3
@@ -1714,8 +1736,16 @@ def main():
         # Handle URL or local path
         temp_pdf = None
         source_is_url = is_url(args.pdf_source)
+        glm_source_url = None  # URL to pass directly to GLM-OCR API
         if source_is_url:
-            pdf_path = download_pdf(args.pdf_source)
+            normalized_url = normalize_arxiv_url(args.pdf_source)
+            if normalized_url != args.pdf_source:
+                print(
+                    f"GLM-OCR: Converted arxiv abstract URL to PDF URL: {normalized_url}",
+                    file=sys.stderr,
+                )
+            glm_source_url = normalized_url
+            pdf_path = download_pdf(normalized_url)
             temp_pdf = pdf_path.parent  # Remember temp dir for cleanup
         else:
             pdf_path = Path(args.pdf_source).resolve()
@@ -1758,6 +1788,7 @@ def main():
                 image_quality,
                 image_lossless,
                 debug=args.debug,
+                source_url=glm_source_url,
             )
 
         # Normalize math delimiters to $...$ / $$...$$
