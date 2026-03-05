@@ -1258,7 +1258,7 @@ def convert_with_glm_ocr(
         "image_lossless": image_lossless,
     }
 
-    # --- Determine file value for API: prefer URL (API no longer accepts base64) ---
+    # --- Determine file value for API: prefer URL, fallback to base64 for small files ---
     if source_url:
         file_value = source_url
         print(
@@ -1266,10 +1266,26 @@ def convert_with_glm_ocr(
             file=sys.stderr,
         )
     else:
-        # Fallback: base64 encode local file (may fail if API rejects data URIs)
+        # For local files: base64 encoding works only for small PDFs.
+        # After base64 encoding, the payload size grows ~33%, so a 15MB PDF
+        # becomes ~20MB in JSON. The API often rejects payloads above ~20MB
+        # even though the documented limit is 50MB for raw PDF files.
+        b64_estimated_mb = file_size * 4 / 3 / (1024 * 1024)
+        if b64_estimated_mb > 20:
+            output_error(
+                f"PDF too large for base64 upload ({file_size / (1024*1024):.1f}MB raw, "
+                f"~{b64_estimated_mb:.0f}MB after base64 encoding). "
+                f"The GLM-OCR API reliably accepts URLs but has undocumented limits on base64 payloads.",
+                "Re-run with the original URL instead of a local file path. "
+                "For arxiv papers, use: uv run scripts/ingest_paper.py https://arxiv.org/pdf/<id>",
+            )
         pdf_bytes = pdf_path.read_bytes()
         pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
         file_value = f"data:application/pdf;base64,{pdf_b64}"
+        print(
+            f"GLM-OCR: Using base64 encoding ({b64_estimated_mb:.0f}MB payload)",
+            file=sys.stderr,
+        )
 
     # --- Call the API (with response caching in debug mode) ---
     cache_path = pdf_path.with_suffix(".glm-ocr.json")
