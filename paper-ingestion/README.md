@@ -4,11 +4,13 @@ A high-performance toolkit for converting PDF research papers into AI-native Mar
 
 ## Key Features
 
-- **High-Fidelity Conversion**: Uses [MinerU](https://github.com/opendatalab/MinerU) (hybrid-auto-engine) for state-of-the-art PDF parsing.
-- **10x Efficiency Boost**: Supports persistent API Server mode to eliminate model loading overhead (processing time reduced from ~130s to ~12s).
-- **Asset Extraction**: Automatically extracts images and figures into a local `assets/` directory.
+- **Multi-Engine Support**: GLM-OCR (cloud, default), [MinerU](https://github.com/opendatalab/MinerU) (GPU, highest quality), Docling (CPU fallback).
+- **Smart PDF Routing**: GLM-OCR automatically selects the optimal upload strategy based on file size and source — small remote PDFs use direct URL upload; large or local PDFs use concurrent per-page image OCR.
+- **Two-Scale Pipeline**: Decoupled rendering — lower resolution for API input (controls token cost), higher resolution for figure cropping (controls image quality), with the crop-scale rendering overlapping API wait time for zero additional latency.
+- **10x MinerU Boost**: Persistent API Server mode eliminates model loading overhead (processing time ~130s → ~12s).
+- **Asset Extraction**: Automatically extracts figures via layout-detected bounding boxes into `assets/` with padding compensation.
 - **Math Support**: High-quality LaTeX formula recognition ($...$ and $$...$$).
-- **Smart Organization**: Automatically renames and organizes output folders by date and paper title.
+- **Smart Organization**: Timestamped folders with auto-detected paper titles.
 - **Modular Dependencies**: Engine dependencies are optional — install only what you need.
 
 ## Installation
@@ -57,6 +59,16 @@ uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2512.05905"
 uv run scripts/ingest_paper.py papers/my_paper.pdf
 ```
 
+**How GLM-OCR routing works:**
+
+| Source | File size | Strategy | Why |
+|--------|-----------|----------|-----|
+| Remote URL | ≤ 20 MB | URL direct upload | Fastest — single API request |
+| Remote URL | > 20 MB | Per-page image OCR | URL upload times out on large PDFs |
+| Local file | Any | Per-page image OCR | API rejects base64-encoded PDFs |
+
+In per-page image mode, each PDF page is rendered to JPEG and uploaded as a base64 data URI. Pages are processed concurrently (default 10 workers) with automatic rate-limit retry and exponential backoff. Figure bounding boxes are cropped at a higher render scale (4x) while the API receives a lower scale (3x) to minimize token usage — the high-res rendering runs in parallel with API calls, adding no extra latency.
+
 ### 2. MinerU Engine (Highest Quality, GPU)
 
 For the best quality, use MinerU with a persistent API server (10x speedup).
@@ -94,7 +106,17 @@ Papers are organized in timestamped folders:
 
 ## Performance
 
-Based on benchmarks (H100 GPU, 15-page paper):
+**GLM-OCR (cloud):**
+
+| Pages | Workers | Time | Notes |
+|-------|---------|------|-------|
+| 37 | 10 | ~41s | Optimal concurrency, zero rate limits |
+| 37 | 1 | ~204s | Serial baseline |
+| 5 | 8 | ~13s | Small PDFs via per-page image mode |
+
+> Workers > 10 may trigger API rate limits (429) with diminishing returns.
+
+**MinerU (GPU, H100):**
 
 | Mode | Processing Time | Throughput | Notes |
 |------|----------------|------------|-------|
