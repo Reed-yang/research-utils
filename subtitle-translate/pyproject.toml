@@ -1,0 +1,9 @@
+[project]
+name = "subtitle-translate"
+version = "0.1.0"
+description = "Translate SRT subtitle files to Chinese using LLM"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "requests>=2.31.0",
+]
