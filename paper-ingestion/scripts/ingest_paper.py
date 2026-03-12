@@ -2038,6 +2038,23 @@ def main():
         )
         # Wrap common inline math patterns (subscripts, greek letters, etc.)
         markdown_content = wrap_inline_math(markdown_content)
+
+        # Fix common OCR-introduced LaTeX formula errors
+        try:
+            import sys as _sys
+            from pathlib import Path as _Path
+            _readings_scripts = _Path.home() / "MyGDrive" / "agent-readings" / "scripts"
+            if str(_readings_scripts) not in _sys.path:
+                _sys.path.insert(0, str(_readings_scripts))
+            from fix_formulas import fix_latex_formulas
+            markdown_content, fix_log = fix_latex_formulas(markdown_content)
+            if fix_log:
+                logger.info(f"LaTeX formula fixes applied ({len(fix_log)} changes)")
+                for entry in fix_log[:10]:
+                    logger.debug(f"  {entry}")
+        except ImportError:
+            logger.debug("fix_formulas not available, skipping formula repair")
+
         resolved_title = resolve_paper_title(detected_title, markdown_content, pdf_path)
         if not resolved_title and not source_is_url:
             resolved_title = pdf_path.stem
