@@ -19,7 +19,7 @@ research-utils/             ← project root
 ### Two Types of Skills
 
 - **Script-based** (paper-ingestion, paper-translate, subtitle-translate): have a `scripts/` directory, executed via `uv run`, require API keys
-- **Built-in** (paper-summary, paper-validator, claude-sync): contain only SKILL.md, executed directly by Claude, no external dependencies
+- **Built-in** (paper-summary, paper-validator, claude-sync, atom-commit, afk): contain only SKILL.md, executed directly by Claude, no external dependencies
 
 ## Standard Workflow
 
