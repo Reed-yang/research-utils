@@ -367,6 +367,16 @@ def is_url(path: str) -> bool:
     return parsed.scheme in ("http", "https")
 
 
+def normalize_arxiv_url(url: str) -> str:
+    """Convert arxiv abstract URL to PDF URL.
+
+    https://arxiv.org/abs/2401.12345 -> https://arxiv.org/pdf/2401.12345
+    https://arxiv.org/abs/2401.12345v2 -> https://arxiv.org/pdf/2401.12345v2
+    """
+    import re
+    return re.sub(r"arxiv\.org/abs/", "arxiv.org/pdf/", url)
+
+
 def download_pdf(url: str) -> Path:
     """Download PDF from URL to a temporary file."""
     import requests
@@ -1179,6 +1189,193 @@ def convert_with_mineru(
 # ============================================================================
 
 
+def _glm_ocr_single_page_image(
+    pil_image,  # PIL Image
+    auth_token: str,
+    page_num: int,
+    total_pages: int,
+    debug: bool = False,
+) -> dict:
+    """OCR a single page image via GLM-OCR API. Returns the full API response dict."""
+    import base64
+    import requests
+
+    # Encode PIL image as JPEG Q90 base64
+    buf = io.BytesIO()
+    pil_image.save(buf, format="JPEG", quality=90)
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    file_value = f"data:image/jpeg;base64,{b64}"
+
+    payload_kb = len(b64) * 3 // 4 // 1024
+    print(
+        f"GLM-OCR: Page {page_num + 1}/{total_pages} (image mode, ~{payload_kb} KB)",
+        file=sys.stderr,
+    )
+
+    url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
+    headers = {
+        "Authorization": auth_token,
+        "Content-Type": "application/json",
+    }
+    payload = {"model": "glm-ocr", "file": file_value}
+
+    max_retries = 3
+    max_rate_limit_retries = 6  # 429s get more patience (backoff: 2,4,8,16,32,64s)
+    last_error = None
+    error_attempts = 0
+    rate_limit_attempts = 0
+    while error_attempts < max_retries and rate_limit_attempts < max_rate_limit_retries:
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+            if response.status_code == 429:
+                rate_limit_attempts += 1
+                wait_time = 2 ** rate_limit_attempts
+                print(
+                    f"GLM-OCR: Rate limited on page {page_num + 1}, waiting {wait_time}s "
+                    f"({rate_limit_attempts}/{max_rate_limit_retries})",
+                    file=sys.stderr,
+                )
+                time.sleep(wait_time)
+                continue
+
+            if response.status_code != 200:
+                error_attempts += 1
+                last_error = f"GLM-OCR API error on page {page_num + 1}: {response.status_code} - {response.text[:300]}"
+                if error_attempts < max_retries:
+                    time.sleep(2 ** error_attempts)
+                    continue
+                output_error(last_error)
+
+            return response.json()
+
+        except requests.Timeout:
+            error_attempts += 1
+            last_error = f"GLM-OCR: Page {page_num + 1} timed out (>120s)"
+            if error_attempts < max_retries:
+                time.sleep(2 ** error_attempts)
+                continue
+            output_error(last_error, "The page image may be too complex.")
+        except requests.RequestException as e:
+            error_attempts += 1
+            last_error = f"GLM-OCR: Page {page_num + 1} request failed: {e}"
+            if error_attempts < max_retries:
+                time.sleep(2 ** error_attempts)
+                continue
+            output_error(last_error)
+
+    output_error(last_error or f"GLM-OCR: Page {page_num + 1} failed after all retries")
+    return {}  # unreachable (output_error exits)
+
+
+def _glm_ocr_via_page_images(
+    pdf_path: Path,
+    auth_token: str,
+    page_count: int,
+    render_scale: float = 3.0,
+    crop_scale: float = 4.0,
+    max_workers: int = 10,
+    debug: bool = False,
+) -> tuple[str, list, dict, dict, dict]:
+    """
+    OCR a PDF by rendering each page as an image and sending concurrently.
+
+    Two-scale pipeline:
+    - render_scale (3x): controls API input size and token cost
+    - crop_scale (4x): controls bbox crop quality, rendered during API wait
+
+    Returns (merged_markdown, merged_layout_details, merged_data_info,
+             total_usage, crop_images_dict).
+    crop_images_dict maps page_num -> PIL Image at crop_scale for bbox reuse.
+    """
+    import pypdfium2 as pdfium
+
+    pdf_doc = pdfium.PdfDocument(str(pdf_path))
+    actual_pages = min(page_count, len(pdf_doc))
+    results_by_page = {}  # pg_num -> API result dict
+
+    print(
+        f"GLM-OCR: Rendering + sending {actual_pages} pages with {max_workers} concurrent workers",
+        file=sys.stderr,
+    )
+
+    def _ocr_page(pil_img, pg_num):
+        return pg_num, _glm_ocr_single_page_image(
+            pil_img, auth_token, pg_num, actual_pages, debug,
+        )
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Phase 1: render @render_scale and submit OCR immediately
+        futures = {}
+        for pg_num in range(actual_pages):
+            pg = pdf_doc[pg_num]
+            bitmap = pg.render(scale=render_scale)
+            pil_img = bitmap.to_pil()
+            futures[executor.submit(_ocr_page, pil_img, pg_num)] = pg_num
+
+        # Phase 2: while API calls are in flight, render @crop_scale for bbox crops
+        # This overlaps CPU rendering with network IO — zero additional wait
+        crop_images = {}
+        if crop_scale != render_scale:
+            print(
+                f"GLM-OCR: Rendering {actual_pages} pages @{crop_scale}x for image extraction (during API wait)",
+                file=sys.stderr,
+            )
+            for pg_num in range(actual_pages):
+                pg = pdf_doc[pg_num]
+                bitmap = pg.render(scale=crop_scale)
+                crop_images[pg_num] = bitmap.to_pil()
+        else:
+            # Same scale: reuse is handled by caller checking None
+            pass
+
+        # Phase 3: collect API results
+        for future in as_completed(futures):
+            pg_num, result = future.result()
+            results_by_page[pg_num] = result
+
+    pdf_doc.close()
+
+    # Merge results in page order
+    all_md = []
+    all_layout_details = []
+    all_pages_info = []
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    for pg_num in range(actual_pages):
+        result = results_by_page[pg_num]
+
+        # Merge markdown with page=0 rewritten to correct global page number
+        md = result.get("md_results", "")
+        if pg_num > 0:
+            md = re.sub(r"page=0,bbox=", f"page={pg_num},bbox=", md)
+        all_md.append(md)
+
+        # Merge layout_details: API returns [[{...}, ...]] (list of lists, one per page)
+        page_details = result.get("layout_details", [])
+        if page_details and isinstance(page_details[0], list):
+            page_details = page_details[0]  # single-page response, unwrap
+        for detail in page_details:
+            if isinstance(detail, dict):
+                detail["page"] = pg_num
+            all_layout_details.append(detail)
+
+        # Collect per-page data_info
+        pages_info = result.get("data_info", {}).get("pages", [])
+        if pages_info:
+            page_info = pages_info[0]
+            page_info["page_number"] = pg_num
+            all_pages_info.append(page_info)
+
+        # Accumulate usage
+        usage = result.get("usage", {})
+        for k in total_usage:
+            total_usage[k] += usage.get(k, 0)
+
+    merged_data_info = {"pages": all_pages_info}
+    return "\n\n".join(all_md), all_layout_details, merged_data_info, total_usage, crop_images or None
+
+
 def convert_with_glm_ocr(
     pdf_path: Path,
     assets_dir: Path,
@@ -1186,11 +1383,16 @@ def convert_with_glm_ocr(
     image_quality: int,
     image_lossless: bool,
     debug: bool = False,
+    source_url: str | None = None,
 ) -> tuple[str, str | None]:
     """
     Convert PDF to Markdown using GLM-OCR cloud API (Zhipu AI layout parsing).
 
-    Sends PDF as base64 data URI to the cloud endpoint. No local GPU required.
+    Smart routing based on file size and source:
+    - Small remote PDF (<=20MB): URL direct upload (single request, fastest)
+    - Large remote PDF (>20MB): per-page image base64 (avoids URL upload timeout)
+    - Local file: per-page image base64 (base64 PDF is rejected by API)
+
     Requires GLM_API_ID and GLM_API_KEY environment variables or paper-ingestion/.env file.
 
     Limits: PDF <= 50MB, Images <= 10MB, max 100 pages.
@@ -1244,107 +1446,144 @@ def convert_with_glm_ocr(
         "image_lossless": image_lossless,
     }
 
-    # --- Base64 encode the PDF ---
-    pdf_bytes = pdf_path.read_bytes()
-    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
-    file_data_uri = f"data:application/pdf;base64,{pdf_b64}"
+    # --- Smart routing: choose URL vs per-page image mode ---
+    SIZE_THRESHOLD_MB = 20  # URL mode works reliably below this
 
-    # --- Call the API (with response caching in debug mode) ---
-    cache_path = pdf_path.with_suffix(".glm-ocr.json")
-    if debug and cache_path.exists():
+    use_image_mode = False
+    if source_url and file_size <= SIZE_THRESHOLD_MB * 1024 * 1024:
+        # Small remote PDF: URL direct (fastest, single request)
+        file_value = source_url
+        _conversion_metadata["mode"] = "url"
         print(
-            f"GLM-OCR: Loading cached response from {cache_path.name}",
+            f"GLM-OCR: Using source URL directly ({file_size / (1024*1024):.1f}MB <= {SIZE_THRESHOLD_MB}MB threshold)",
             file=sys.stderr,
         )
-        result = json.loads(cache_path.read_text(encoding="utf-8"))
     else:
-        url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
-        headers = {
-            "Authorization": auth_token,
-            "Content-Type": "application/json",
+        # Large remote PDF or local file: per-page image mode
+        use_image_mode = True
+        _conversion_metadata["mode"] = "page-images"
+        reason = (
+            f"large remote PDF ({file_size / (1024*1024):.1f}MB > {SIZE_THRESHOLD_MB}MB threshold)"
+            if source_url
+            else "local file (base64 PDF not supported by API)"
+        )
+        print(f"GLM-OCR: Using per-page image mode ({reason})", file=sys.stderr)
+
+    cached_page_images = None  # Set by image mode for bbox crop reuse
+
+    if use_image_mode:
+        # --- Per-page image mode ---
+        merged_md, merged_layout, merged_data_info, total_usage, cached_page_images = (
+            _glm_ocr_via_page_images(
+                pdf_path, auth_token, page_count, render_scale=3.0, debug=debug,
+            )
+        )
+        if total_usage:
+            _conversion_metadata["usage"] = total_usage
+
+        # Build a synthetic result dict for the bbox extraction pipeline below
+        result = {
+            "md_results": merged_md,
+            "layout_details": merged_layout,
+            "data_info": merged_data_info,
         }
-        payload = {
-            "model": "glm-ocr",
-            "file": file_data_uri,
-        }
+        markdown_content = merged_md
+    else:
+        # --- URL direct mode: single API call (with response caching in debug mode) ---
+        cache_path = pdf_path.with_suffix(".glm-ocr.json")
+        if debug and cache_path.exists():
+            print(
+                f"GLM-OCR: Loading cached response from {cache_path.name}",
+                file=sys.stderr,
+            )
+            result = json.loads(cache_path.read_text(encoding="utf-8"))
+        else:
+            url = "https://open.bigmodel.cn/api/paas/v4/layout_parsing"
+            headers = {
+                "Authorization": auth_token,
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": "glm-ocr",
+                "file": file_value,
+            }
 
-        max_retries = 3
-        last_error = None
-        result = None
+            max_retries = 3
+            last_error = None
+            result = None
 
-        for attempt in range(max_retries):
-            try:
-                print(
-                    f"GLM-OCR: Sending PDF to cloud API ({file_size / 1024:.0f} KB, "
-                    f"{page_count} pages, attempt {attempt + 1}/{max_retries})",
-                    file=sys.stderr,
-                )
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=300,  # 5 min timeout for cloud processing
-                )
-
-                if response.status_code == 429:
-                    wait_time = 2 ** (attempt + 1)
+            for attempt in range(max_retries):
+                try:
                     print(
-                        f"GLM-OCR: Rate limited, waiting {wait_time}s",
+                        f"GLM-OCR: Sending PDF to cloud API ({file_size / 1024:.0f} KB, "
+                        f"{page_count} pages, attempt {attempt + 1}/{max_retries})",
                         file=sys.stderr,
                     )
-                    time.sleep(wait_time)
-                    continue
-
-                if response.status_code != 200:
-                    last_error = (
-                        f"GLM-OCR API error: {response.status_code} - "
-                        f"{response.text[:300]}"
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=300,  # 5 min timeout for cloud processing
                     )
+
+                    if response.status_code == 429:
+                        wait_time = 2 ** (attempt + 1)
+                        print(
+                            f"GLM-OCR: Rate limited, waiting {wait_time}s",
+                            file=sys.stderr,
+                        )
+                        time.sleep(wait_time)
+                        continue
+
+                    if response.status_code != 200:
+                        last_error = (
+                            f"GLM-OCR API error: {response.status_code} - "
+                            f"{response.text[:300]}"
+                        )
+                        if attempt < max_retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        output_error(last_error)
+
+                    result = response.json()
+                    break
+
+                except requests.Timeout:
+                    last_error = "GLM-OCR API request timed out (>5 minutes)"
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    output_error(
+                        last_error, "The PDF may be too complex. Try a local engine."
+                    )
+                except requests.RequestException as e:
+                    last_error = f"GLM-OCR API request failed: {e}"
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                         continue
                     output_error(last_error)
+            else:
+                output_error(last_error or "GLM-OCR API failed after all retries")
 
-                result = response.json()
-                break
-
-            except requests.Timeout:
-                last_error = "GLM-OCR API request timed out (>5 minutes)"
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                output_error(
-                    last_error, "The PDF may be too complex. Try a local engine."
+            if debug:
+                cache_path.write_text(
+                    json.dumps(result, ensure_ascii=False), encoding="utf-8"
                 )
-            except requests.RequestException as e:
-                last_error = f"GLM-OCR API request failed: {e}"
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                output_error(last_error)
-        else:
-            output_error(last_error or "GLM-OCR API failed after all retries")
+                print(
+                    f"GLM-OCR: Debug: cached response to {cache_path.name}",
+                    file=sys.stderr,
+                )
 
-        if debug:
-            cache_path.write_text(
-                json.dumps(result, ensure_ascii=False), encoding="utf-8"
-            )
-            print(
-                f"GLM-OCR: Debug: cached response to {cache_path.name}",
-                file=sys.stderr,
-            )
+        # Extract usage from URL-mode response
+        glm_usage = result.get("usage", {})
+        if glm_usage:
+            _conversion_metadata["usage"] = {
+                "prompt_tokens": glm_usage.get("prompt_tokens", 0),
+                "completion_tokens": glm_usage.get("completion_tokens", 0),
+                "total_tokens": glm_usage.get("total_tokens", 0),
+            }
 
-    # --- Extract usage from response (if available) ---
-    glm_usage = result.get("usage", {})
-    if glm_usage:
-        _conversion_metadata["usage"] = {
-            "prompt_tokens": glm_usage.get("prompt_tokens", 0),
-            "completion_tokens": glm_usage.get("completion_tokens", 0),
-            "total_tokens": glm_usage.get("total_tokens", 0),
-        }
-
-    # --- Extract markdown from response ---
-    markdown_content = result.get("md_results", "")
+        markdown_content = result.get("md_results", "")
     if not markdown_content:
         output_error(
             "GLM-OCR returned empty markdown",
@@ -1382,7 +1621,26 @@ def convert_with_glm_ocr(
     rendered_pages = {}  # page_num -> (pil_image, glm_w, glm_h)
     glm_pages = result.get("data_info", {}).get("pages", [])
 
-    if pages_needed:
+    if pages_needed and cached_page_images:
+        # Image mode: reuse crop-scale renders (API coords based on render_scale,
+        # mapping to crop_scale happens via glm_w/glm_h -> pil_img.size ratio)
+        for pg_num in sorted(pages_needed):
+            if pg_num not in cached_page_images:
+                print(f"GLM-OCR: Warning: page {pg_num} not in cache, skipping", file=sys.stderr)
+                continue
+            pil_img = cached_page_images[pg_num]
+            if pg_num < len(glm_pages):
+                glm_w = glm_pages[pg_num]["width"]
+                glm_h = glm_pages[pg_num]["height"]
+            else:
+                glm_w, glm_h = pil_img.size
+            rendered_pages[pg_num] = (pil_img, glm_w, glm_h)
+        print(
+            f"GLM-OCR: Reusing {len(rendered_pages)} crop-scale page renders for image extraction",
+            file=sys.stderr,
+        )
+    elif pages_needed:
+        # URL mode: render from PDF at higher resolution for quality
         try:
             import pypdfium2 as pdfium
 
@@ -1456,13 +1714,18 @@ def convert_with_glm_ocr(
 
                 # Map GLM-OCR coords to our render resolution.
                 # GLM-OCR uses top-left origin, same as image coordinates.
+                # Add padding (min of 2% bbox size, 15px) to compensate for
+                # tight API bbox bounds, clamped to image edges.
                 sx = img_w / glm_w
                 sy = img_h / glm_h
+                _MAX_PAD_PX = 15
+                pad_x = min(round((bx2 - bx1) * 0.02 * sx), _MAX_PAD_PX)
+                pad_y = min(round((by2 - by1) * 0.02 * sy), _MAX_PAD_PX)
                 crop_box = (
-                    max(0, round(bx1 * sx)),
-                    max(0, round(by1 * sy)),
-                    min(img_w, round(bx2 * sx)),
-                    min(img_h, round(by2 * sy)),
+                    max(0, round(bx1 * sx) - pad_x),
+                    max(0, round(by1 * sy) - pad_y),
+                    min(img_w, round(bx2 * sx) + pad_x),
+                    min(img_h, round(by2 * sy) + pad_y),
                 )
 
                 cropped = pil_img.crop(crop_box)
@@ -1714,8 +1977,16 @@ def main():
         # Handle URL or local path
         temp_pdf = None
         source_is_url = is_url(args.pdf_source)
+        glm_source_url = None  # URL to pass directly to GLM-OCR API
         if source_is_url:
-            pdf_path = download_pdf(args.pdf_source)
+            normalized_url = normalize_arxiv_url(args.pdf_source)
+            if normalized_url != args.pdf_source:
+                print(
+                    f"GLM-OCR: Converted arxiv abstract URL to PDF URL: {normalized_url}",
+                    file=sys.stderr,
+                )
+            glm_source_url = normalized_url
+            pdf_path = download_pdf(normalized_url)
             temp_pdf = pdf_path.parent  # Remember temp dir for cleanup
         else:
             pdf_path = Path(args.pdf_source).resolve()
@@ -1758,6 +2029,7 @@ def main():
                 image_quality,
                 image_lossless,
                 debug=args.debug,
+                source_url=glm_source_url,
             )
 
         # Normalize math delimiters to $...$ / $$...$$
@@ -1843,7 +2115,8 @@ def main():
                 print("  Image Lossless: true", file=sys.stderr)
         elif engine == "glm-ocr":
             meta = get_conversion_metadata()
-            print("  Backend: GLM-OCR (cloud API)", file=sys.stderr)
+            mode = meta.get("mode", "cloud")
+            print(f"  Backend: GLM-OCR (cloud API, {mode})", file=sys.stderr)
             print(f"  Pages: {meta.get('page_count', 'unknown')}", file=sys.stderr)
             print(f"  File Size: {meta.get('file_size_mb', 'unknown')} MB", file=sys.stderr)
             usage = meta.get("usage")

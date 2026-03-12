@@ -82,10 +82,27 @@ The translated file is saved alongside the original:
 {"status": "error", "message": "..."}
 ```
 
+## Resume from Cache
+
+Long papers may fail due to API errors.  Use `--resume` to cache successful chunks and resume from where you left off:
+
+```bash
+# First attempt (may fail partway)
+uv run scripts/translate_paper.py /path/to/full_text.md --resume
+
+# Re-run: only translates failed chunks, skips cached ones
+uv run scripts/translate_paper.py /path/to/full_text.md --resume
+```
+
+- Cache file: `.translate_cache.json` in the paper directory
+- Auto-deleted on successful completion
+- Invalidated if source file, backend, target language, or chunk size changes
+
 ## Error Handling
 
 | Error | Action |
 |-------|--------|
 | API rate limit | Automatic retry with backoff |
-| Token limit exceeded | Text automatically chunked, with sub-chunk retry on marker loss |
+| Token limit exceeded | Text automatically chunked; validation retries on structural mismatch |
 | Network error | Retry up to 3 times |
+| Partial failure with `--resume` | Successful chunks cached; re-run to resume |

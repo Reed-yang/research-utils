@@ -15,11 +15,8 @@ PDF / URL
 paper-ingestion ──→ full_text.md + assets/
   │
   ├──→ summary ──→ notes.md (structured summary + keyword backfill)
-  ├──→ paper-translate ──→ full_text_ch.md (Chinese translation)
-  └──→ paper-validator ──→ peer-review style feedback
+  └──→ paper-translate ──→ full_text_ch.md (Chinese translation)
 ```
-
-**subtitle-translate** is also included for translating academic video/lecture subtitles.
 
 ## Skills Overview
 
@@ -30,16 +27,14 @@ paper-ingestion ──→ full_text.md + assets/
 | **paper-summary** | Structured summary + keyword extraction + tag backfill | Claude (built-in skill) |
 | **paper-validator** | Peer-review style critique targeting top-tier conferences | Claude (built-in skill) |
 | **subtitle-translate** | SRT subtitle translation, preserving timestamps | DeepSeek / TensorBlock |
+| **claude-sync** | Cross-device ~/.claude sync with interactive conflict resolution | claude-sync CLI (built-in skill) |
+| **atom-commit** | Atomic git commits with professional Conventional Commits messages | Claude (built-in skill) |
+| **afk** | Autonomous task execution — complete all planned work unattended | Claude (built-in skill) |
 
-## Why DeepSeek
+## Why These backends
 
-For translation and OCR-related tasks, **DeepSeek** is the recommended backend:
+DeepSeek is the recommended backend for translation. For OCR, the default is Zhipu GLM-OCR cloud API. Both are chosen for their extremely low cost (processing 100 PDFs costs less than \$1), strong accuracy on academic text and technical terminology, and low latency for concurrent long-document processing.
 
-- **Extremely low cost** — among the cheapest LLM APIs available, ideal for batch-processing large volumes of papers
-- **High quality** — strong accuracy on academic text translation with proper handling of technical terminology
-- **Fast** — low response latency, smooth experience for concurrent long-document translation
-
-For OCR, the default is Zhipu GLM-OCR cloud API — also chosen for its extremely low cost (processing 100 PDFs costs less than \$1).
 
 ## Getting Started
 
@@ -93,7 +88,13 @@ research-utils/
 │   └── SKILL.md
 ├── paper-validator/       # Paper review
 │   └── SKILL.md
-└── subtitle-translate/    # Subtitle translation
-    ├── scripts/
+├── subtitle-translate/    # Subtitle translation
+│   ├── scripts/
+│   └── SKILL.md
+├── claude-sync/           # Cross-device sync with conflict resolution
+│   └── SKILL.md
+├── atom-commit/           # Atomic git commits with professional messages
+│   └── SKILL.md
+└── afk/                   # Autonomous task execution until all work is done
     └── SKILL.md
 ```
