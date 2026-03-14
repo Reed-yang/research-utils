@@ -133,6 +133,11 @@ Focus on the outcomes that matter most for the paper's claim; do not list every 
 ## Limitations
 [1-2 sentences. Keep this brief, and note whether the limitations materially weaken the main conclusion.]
 
+## Historical Impact (conditional — include ONLY when criteria in Summary Requirements are met)
+[2-5 sentences. Describe how this work influenced subsequent research:
+what paradigm it established, what methods or techniques it introduced that became widely adopted,
+or what research directions it opened. Focus on concrete downstream impact, not speculation.]
+
 ## Keywords
 keyword1, keyword2, keyword3, keyword4, ...
 ```
@@ -150,6 +155,7 @@ keyword1, keyword2, keyword3, keyword4, ...
 - **Technically accurate**: Preserve precise terminology and comparisons
 - **Novelty-focused**: Clearly separate what the paper does from what is actually new
 - **Results-focused**: Summarize the strongest outcomes, not every experiment
+- **Historical Impact gate**: Include the `Historical Impact` section ONLY when ALL of: (a) you have confident knowledge that this paper's method, framework, or idea was adopted or extended by multiple subsequent works, (b) you can name concrete examples of the downstream influence (named methods, paradigm shifts, standard components). Omit the section entirely when: the paper is very recent (published within ~6 months), is an incremental improvement on existing methods, or you lack sufficient knowledge about its downstream influence. When in doubt, omit.
 
 ## Keyword Extraction Guidelines
 
