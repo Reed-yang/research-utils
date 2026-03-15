@@ -21,3 +21,8 @@ mineru = [
 
 [tool.uv.sources]
 mineru = { path = "mineru-fork", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
