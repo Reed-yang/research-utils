@@ -1,6 +1,6 @@
 ---
 name: claude-sync
-description: Sync ~/.claude settings across devices using claude-sync CLI. Use when user wants to pull/push Claude Code configuration, resolve cross-device conflicts in settings.json/CLAUDE.md, or merge plugin lists between machines. Handles platform-specific conflicts (Linux↔Windows), interactive diff review, and selective field merging.
+description: Sync ~/.claude settings across devices using claude-sync CLI. Use when user wants to pull/push Claude Code configuration, resolve cross-device conflicts, merge plugin lists between machines, selectively sync specific paths, clean up remote storage, or manage .claudesyncignore rules. Handles platform-specific conflicts (Linux↔Windows), interactive diff review, selective field merging, parallel I/O, and glob-based remote deletion.
 ---
 
 # Claude Sync Manager
@@ -14,6 +14,12 @@ Synchronize `~/.claude` configuration across devices with interactive conflict r
 - User wants to check what changed on a remote device
 - User needs to resolve conflicts between local and remote `~/.claude`
 - User wants to merge specific fields (e.g., plugins) without full overwrite
+- User wants to delete specific files from remote R2/S3/GCS storage
+- User says "delete", "clean up", "remove" related to remote sync storage
+- User wants to selectively push/pull only certain paths (e.g., "just sync plugins")
+- User wants to set up or edit .claudesyncignore rules
+- User wants to back up or restore specific remote files to a local directory
+- User wants to remap session paths after moving project directories
 
 ## Prerequisites
 
@@ -26,12 +32,60 @@ Synchronize `~/.claude` configuration across devices with interactive conflict r
   ```
 - On Windows, `claude-sync status` may fail with "failed to hash skills" if `~/.claude/skills` is a symlink/junction — this is a known tool bug and does not affect pull/push operations
 
+## New CLI Commands
+
+### Selective Push/Pull
+
+Push or pull specific paths instead of everything:
+
+```bash
+claude-sync push skills/ settings.json           # Push only these paths
+claude-sync pull projects/ CLAUDE.md              # Pull only these paths
+claude-sync pull --target /tmp/backup plugins/    # Download to custom dir (read-only)
+claude-sync pull --dry-run                        # Preview what would change
+```
+
+Paths are relative to `~/.claude/`. All commands also respect `.claudesyncignore`.
+
+### Delete Command
+
+Remove remote files matching glob patterns:
+
+```bash
+claude-sync delete "plugins/cache/**" --dry-run           # Preview
+claude-sync delete "plugins/marketplaces/*/.git/**"       # Delete .git dirs
+claude-sync delete "projects/-home-*/**"                  # Delete old-path sessions
+```
+
+**Always run with `--dry-run` first.** Deletion requires typing 'yes' to confirm. Warns if deleting >50% of all remote files.
+
+### .claudesyncignore
+
+Place `~/.claude/.claudesyncignore` to permanently exclude paths from sync:
+
+```gitignore
+plugins/marketplaces/*/.git/
+plugins/cache/
+**/node_modules/
+skills/paper-ingestion/mineru-fork/
+```
+
+Uses `.gitignore` syntax. Applied to both push and pull.
+
+### Status and Diff with Path Filtering
+
+```bash
+claude-sync status plugins/                # Show changes in specific directory
+claude-sync diff settings.json             # Compare specific file
+```
+
 ## Workflow
 
 ### Phase 1: Pre-flight Check
 
 1. Verify `claude-sync` is installed: run `claude-sync --version`
 2. Run `claude-sync pull --dry-run` to preview all incoming changes
+   - If user wants selective sync, add path arguments: `claude-sync pull --dry-run skills/ CLAUDE.md`
 3. Parse the output and categorize files into:
    - **OVERWRITE**: files that exist locally and will be replaced by remote versions
    - **NEW**: files only on remote, will be added locally
@@ -108,6 +162,15 @@ After pull and merge:
    - Linux paths (`/home/...`) on Windows
    - Windows paths (`C:\...`) on Linux
    - Hardcoded node/python binary paths from another machine
+
+### Phase 4b: Remote Cleanup (when requested)
+
+If the user wants to clean up remote storage:
+1. Identify what to clean: `.git/` dirs, cache, old-path sessions, etc.
+2. Run `claude-sync delete [patterns...] --dry-run` to preview
+3. Show the matched file count and total size
+4. Ask user to confirm before executing actual deletion
+5. After deletion, run `claude-sync pull --dry-run` to verify remaining files are correct
 
 ### Phase 5: Verification & Cleanup
 
