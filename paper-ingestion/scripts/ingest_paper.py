@@ -2038,6 +2038,19 @@ def main():
         )
         # Wrap common inline math patterns (subscripts, greek letters, etc.)
         markdown_content = wrap_inline_math(markdown_content)
+
+        # Fix common OCR-introduced LaTeX formula errors
+        from fix_formulas import fix_latex_formulas
+        markdown_content, fix_log = fix_latex_formulas(markdown_content)
+        if fix_log:
+            print(
+                f"LaTeX formula fixes applied ({len(fix_log)} changes)",
+                file=sys.stderr,
+            )
+            if args.debug:
+                for entry in fix_log[:10]:
+                    print(f"  {entry}", file=sys.stderr)
+
         resolved_title = resolve_paper_title(detected_title, markdown_content, pdf_path)
         if not resolved_title and not source_is_url:
             resolved_title = pdf_path.stem

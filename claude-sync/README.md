@@ -13,15 +13,30 @@ Cross-device `~/.claude` configuration sync with interactive conflict resolution
 
 This skill wraps `claude-sync` with an intelligent, interactive layer that understands these conflicts and asks before acting.
 
+With the new selective sync and delete features, the skill also helps with:
+- Targeted sync of specific paths (e.g., "just pull my skills and settings")
+- Remote storage cleanup with glob pattern matching and dry-run preview
+- Setting up `.claudesyncignore` to prevent syncing unwanted files (cache, .git, node_modules)
+- Session path remapping when moving projects to a new filesystem location
+
 ## Installing claude-sync
 
-### npm (if your platform is supported)
+### Build from Source (recommended for this fork)
+
+```bash
+git clone https://github.com/tawanorg/claude-sync.git /tmp/claude-sync
+cd /tmp/claude-sync
+go build -ldflags "-s -w" -o bin/claude-sync ./cmd/claude-sync
+sudo cp bin/claude-sync /usr/local/bin/   # or cp to ~/.local/bin/
+```
+
+### npm (upstream releases only)
 
 ```bash
 npm install -g @tawandotorg/claude-sync
 ```
 
-Pre-built binaries are available for macOS (arm64/amd64) and Linux (amd64/arm64). **Windows binaries are not currently provided** — see below.
+> Note: npm releases may not include the latest fork features (selective sync, delete, parallel I/O).
 
 ### Building from Source (Windows / unsupported platforms / glibc issues)
 
@@ -143,6 +158,43 @@ Claude will run `pull --dry-run` and `diff`, then present a detailed report.
 
 Claude will show what will be pushed and ask for confirmation before executing.
 
+#### Selective Sync (specific paths only)
+
+```
+"只帮我同步 skills 和 settings.json"
+"pull only my plugins directory"
+```
+
+Claude will use path arguments: `claude-sync pull skills/ settings.json`
+
+#### Remote Cleanup
+
+```
+"帮我清理远端的 .git 目录和插件缓存"
+"delete old session files from R2"
+```
+
+Claude will:
+1. Run `claude-sync delete [patterns] --dry-run` to preview
+2. Show matched files and total size
+3. Ask for confirmation before executing
+
+#### Set Up Ignore Rules
+
+```
+"帮我配置 .claudesyncignore 排除 node_modules 和 .git"
+```
+
+Claude will create/edit `~/.claude/.claudesyncignore` with appropriate patterns.
+
+#### Backup to Local Directory
+
+```
+"把远端的 plugins 备份到 /tmp/backup"
+```
+
+Claude will run: `claude-sync pull --target /tmp/backup plugins/`
+
 ### Tips for Better Interactions
 
 1. **Be specific about what you want to sync** — "sync plugins only" is better than "sync everything"
@@ -158,6 +210,7 @@ Claude will show what will be pushed and ask for confirmation before executing.
 | `statusLine` contains hardcoded paths after pull | Claude Code HUD may break | The skill auto-detects cross-platform paths and discards incompatible `statusLine` entries |
 | Windows binary not in npm releases | `npm install -g` fails with 404 | Build from source (see above) |
 | `settings.local.json` pulled from remote | May contain machine-specific permissions | The skill warns about platform-specific content and recommends not merging |
+| Delete patterns with leading dashes | `mv` in remap script fails | Use `mv --` prefix when handling paths starting with `-` |
 
 ## How It Works
 

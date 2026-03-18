@@ -133,6 +133,7 @@ Get an API key at https://open.bigmodel.cn
 ## Math Formatting
 
 - Inline and display math are normalized to LaTeX using `$...$` / `$$...$$`
+- After OCR conversion, a LaTeX formula repair pass (`fix_latex_formulas` from `agent-readings/scripts/`) automatically fixes common errors: split words in `\text{}` commands, brace imbalance (±1), spaced abbreviations, bare letter sequences, and confused pseudocode delimiters. This step is optional — if the repair module is not available, it is silently skipped.
 
 ## Environment Setup (if there is no env yet)
 

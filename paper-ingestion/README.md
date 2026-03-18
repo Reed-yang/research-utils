@@ -9,7 +9,7 @@ A high-performance toolkit for converting PDF research papers into AI-native Mar
 - **Two-Scale Pipeline**: Decoupled rendering — lower resolution for API input (controls token cost), higher resolution for figure cropping (controls image quality), with the crop-scale rendering overlapping API wait time for zero additional latency.
 - **10x MinerU Boost**: Persistent API Server mode eliminates model loading overhead (processing time ~130s → ~12s).
 - **Asset Extraction**: Automatically extracts figures via layout-detected bounding boxes into `assets/` with padding compensation.
-- **Math Support**: High-quality LaTeX formula recognition ($...$ and $$...$$).
+- **Math Support**: High-quality LaTeX formula recognition ($...$ and $$...$$), with automatic post-processing to fix common OCR-introduced formula errors (split words in `\text{}`, brace imbalance, broken delimiters, etc.).
 - **Smart Organization**: Timestamped folders with auto-detected paper titles.
 - **Modular Dependencies**: Engine dependencies are optional — install only what you need.
 
