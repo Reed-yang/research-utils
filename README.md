@@ -26,6 +26,7 @@ paper-ingestion ──→ full_text.md + assets/
 | **paper-translate** | Translate paper markdown, preserving LaTeX, code, and image refs | DeepSeek / TensorBlock |
 | **paper-summary** | Structured summary + keyword extraction + tag backfill | Claude (built-in skill) |
 | **paper-validator** | Peer-review style critique targeting top-tier conferences | Claude (built-in skill) |
+| **review-research-plan** | Critical review & iterative polishing of research plans/roadmaps | Claude (built-in skill) |
 | **subtitle-translate** | SRT subtitle translation, preserving timestamps | DeepSeek / TensorBlock |
 | **claude-sync** | Cross-device ~/.claude sync with interactive conflict resolution | claude-sync CLI (built-in skill) |
 | **atom-commit** | Atomic git commits with professional Conventional Commits messages | Claude (built-in skill) |
@@ -87,6 +88,10 @@ research-utils/
 ├── paper-summary/         # Structured summarization
 │   └── SKILL.md
 ├── paper-validator/       # Paper review
+│   └── SKILL.md
+├── review-research-plan/  # Research plan review & iteration
+│   ├── commands/          # quick-review, full-review, re-review
+│   ├── references/        # adversarial, novelty, feasibility, report-format
 │   └── SKILL.md
 ├── subtitle-translate/    # Subtitle translation
 │   ├── scripts/

@@ -32,6 +32,65 @@ Synchronize `~/.claude` configuration across devices with interactive conflict r
   ```
 - On Windows, `claude-sync status` may fail with "failed to hash skills" if `~/.claude/skills` is a symlink/junction — this is a known tool bug and does not affect pull/push operations
 
+## Environment-Aware Pull Profiles
+
+The remote stores **everything** (push is always full). Pull is where filtering happens, based on the target environment.
+
+**Before any pull, detect the environment** by checking `uname -s` and comparing with the remote content's origin platform. Ask the user if unsure.
+
+### Profile: Same-Cluster Node (Linux ↔ Linux, shared storage)
+
+Same OS, same cluster, shared mount paths — pull everything:
+
+```bash
+claude-sync pull          # Full pull
+```
+
+All caches, session-env, shell-snapshots, file-history, tool-results, subagents are valid and useful on sibling nodes.
+
+### Profile: Cross-Platform (Linux ↔ Windows/macOS)
+
+Different OS or different network — pull only universal files:
+
+```bash
+claude-sync pull \
+  CLAUDE.md \
+  settings.json \
+  history.jsonl \
+  plugins/marketplaces/ \
+  plugins/claude-hud/ \
+  skills/ \
+  projects/*/memory/
+```
+
+**Skip these** (platform-specific or cache-only, may cause conflicts):
+
+| Path | Reason |
+|------|--------|
+| `session-env/` | Shell env vars, OS-specific |
+| `shell-snapshots/` | Bash profile snapshots, OS-specific |
+| `settings.local.json` | Machine-specific permissions/paths |
+| `cache/` | Auto-regenerated on startup |
+| `backups/` | Local safety net only |
+| `paste-cache/` | Ephemeral paste data |
+| `file-history/` | Local undo history, paths won't match |
+| `projects/*/tool-results/` | Large command output caches (~100MB), session-bound |
+| `projects/*/subagents/` | Subagent conversation logs (~120MB), session-bound |
+| `*.wakatime` | WakaTime tracking, device-specific |
+| `.usage-cache*` | Plugin usage counters, auto-refreshed |
+| `tasks/` | In-progress task state, session-bound |
+
+### Pull Profile Selection in Phase 1
+
+When the user requests a pull, **always ask which profile to use** before proceeding:
+
+> Detected platform: Linux. Which pull profile?
+> 1. **Full pull** (same-cluster node — pull everything)
+> 2. **Cross-platform pull** (Win/Mac — universal files only)
+> 3. **Custom** (I'll specify paths)
+
+Then apply the corresponding pull command.
+
 ## New CLI Commands
 
 ### Selective Push/Pull
@@ -84,9 +143,12 @@ claude-sync diff settings.json             # Compare specific file
 ### Phase 1: Pre-flight Check
 
 1. Verify `claude-sync` is installed: run `claude-sync --version`
-2. Run `claude-sync pull --dry-run` to preview all incoming changes
-   - If user wants selective sync, add path arguments: `claude-sync pull --dry-run skills/ CLAUDE.md`
-3. Parse the output and categorize files into:
+2. **Select pull profile** — ask the user which environment they are pulling into (see "Environment-Aware Pull Profiles" above). This determines the pull path scope.
+3. Run `claude-sync pull --dry-run [paths...]` to preview incoming changes, using paths from the selected profile
+   - Full pull: no path arguments
+   - Cross-platform: use the universal paths list
+   - Custom: user-specified paths
+4. Parse the output and categorize files into:
    - **OVERWRITE**: files that exist locally and will be replaced by remote versions
    - **NEW**: files only on remote, will be added locally
    - **KEEP**: files only local, will not be touched

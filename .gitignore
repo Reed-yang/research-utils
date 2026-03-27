@@ -4,7 +4,9 @@ todo.md
 .qodo
 .agent
 .cursor
+.claude
 
+.media-tools
 
 benchmark.*
 *.log
