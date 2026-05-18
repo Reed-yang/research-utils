@@ -111,11 +111,61 @@ def sanitize_filename(name: str) -> str:
     return sanitized
 
 
+_SECTION_NAME_WORDS = {
+    "abstract", "introduction", "background", "preliminary", "preliminaries",
+    "related work", "related works", "methodology", "method", "methods",
+    "approach", "experiments", "experiment", "experimental setup",
+    "evaluation", "results", "results and discussion", "discussion",
+    "ablation", "ablation study", "ablation studies", "analysis",
+    "limitations", "future work", "conclusion", "conclusions",
+    "conclusion and future work", "acknowledgment", "acknowledgments",
+    "acknowledgement", "acknowledgements", "references", "bibliography",
+    "appendix", "appendices", "contributions", "contribution",
+    "supplementary material", "broader impact", "ethics statement",
+}
+
+
+def looks_like_section_heading(text: str) -> bool:
+    """High-precision: is this a body section heading ('2. Related Work',
+    '3.1 Method', bare 'Related Work') rather than a paper title?
+    Must NOT reject real paper titles."""
+    if not text:
+        return False
+    s = text.strip()
+    # Numbered-section prefix: "2 Related Work", "2. Related Work", "3.1 Method"
+    if re.match(r"^\d+(\.\d+)*\.?\s+\S", s):
+        return True
+    # Appendix numbering ONLY when letter is followed by .<digit>:
+    # "A.1 Implementation"  -- NOT "A Survey ..." / "A Neural ..."
+    if re.match(r"^[A-H]\.\d+\.?\s+\S", s):
+        return True
+    # Pure numbering-only garbage: "2", "23", "3.1", "A.1"
+    if re.fullmatch(r"\d+(\.\d+)*\.?", s):
+        return True
+    if re.fullmatch(r"[A-H]\.\d+\.?", s):
+        return True
+    # STRICT exact match of a section name after stripping leading numbering
+    # (exact equality, not startswith -- keeps "Introduction to Diffusion Models").
+    stripped = re.sub(r"^(?:\d+(\.\d+)*\.?|[A-H]\.\d+\.?)\s+", "", s)
+    normalized = stripped.strip().strip(".:").strip().lower()
+    if normalized in _SECTION_NAME_WORDS:
+        return True
+    return False
+
+
 def extract_title_from_markdown(markdown_content: str) -> str | None:
-    """Extract title from markdown heading."""
-    title_match = re.search(r"^\s*#{1,3}\s+(.+?)\s*$", markdown_content, re.MULTILINE)
-    if title_match:
-        return title_match.group(1).strip()
+    """First markdown heading that is NOT a body section heading.
+    None if every heading looks like a section (e.g. page-1 OCR failed:
+    doc starts with '<!-- PAGE 1 FAILED -->' then '## 2. Related Work')."""
+    for m in re.finditer(
+        r"^[ \t]*#{1,3}[ \t]+(.+?)[ \t]*$", markdown_content, re.MULTILINE
+    ):
+        candidate = m.group(1).strip()
+        if not candidate:
+            continue
+        if looks_like_section_heading(candidate):
+            continue
+        return candidate
     return None
 
 
@@ -153,6 +203,8 @@ def looks_like_placeholder_title(title: str) -> bool:
     """Check if title is likely a filename or arXiv id."""
     normalized = title.strip()
     if not normalized:
+        return True
+    if looks_like_section_heading(normalized):
         return True
     lowered = normalized.lower()
     if lowered.endswith(".pdf"):
@@ -1255,17 +1307,20 @@ def _glm_ocr_single_page_image(
             if error_attempts < max_retries:
                 time.sleep(2 ** error_attempts)
                 continue
-            output_error(last_error, "The page image may be too complex.")
+            print(f"WARNING: {last_error} - The page image may be too complex.", file=sys.stderr)
+            return {"_failed": True, "_error": last_error}
         except requests.RequestException as e:
             error_attempts += 1
             last_error = f"GLM-OCR: Page {page_num + 1} request failed: {e}"
             if error_attempts < max_retries:
                 time.sleep(2 ** error_attempts)
                 continue
-            output_error(last_error)
+            print(f"WARNING: {last_error}", file=sys.stderr)
+            return {"_failed": True, "_error": last_error}
 
-    output_error(last_error or f"GLM-OCR: Page {page_num + 1} failed after all retries")
-    return {}  # unreachable (output_error exits)
+    msg = last_error or f"GLM-OCR: Page {page_num + 1} failed after all retries"
+    print(f"WARNING: {msg}", file=sys.stderr)
+    return {"_failed": True, "_error": msg}
 
 
 def _glm_ocr_via_page_images(
@@ -1342,8 +1397,15 @@ def _glm_ocr_via_page_images(
     all_pages_info = []
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+    failed_pages = []
     for pg_num in range(actual_pages):
-        result = results_by_page[pg_num]
+        result = results_by_page.get(pg_num, {})
+
+        # Skip failed pages
+        if result.get("_failed"):
+            failed_pages.append(pg_num + 1)
+            all_md.append(f"\n\n<!-- PAGE {pg_num + 1} FAILED: {result.get('_error', 'unknown')} -->\n\n")
+            continue
 
         # Merge markdown with page=0 rewritten to correct global page number
         md = result.get("md_results", "")
@@ -1372,8 +1434,40 @@ def _glm_ocr_via_page_images(
         for k in total_usage:
             total_usage[k] += usage.get(k, 0)
 
-    merged_data_info = {"pages": all_pages_info}
+    if failed_pages:
+        print(
+            f"GLM-OCR: WARNING: {len(failed_pages)} page(s) failed: {failed_pages}. "
+            f"Successfully processed {actual_pages - len(failed_pages)}/{actual_pages} pages.",
+            file=sys.stderr,
+        )
+
+    merged_data_info = {"pages": all_pages_info, "_failed_pages": failed_pages}
     return "\n\n".join(all_md), all_layout_details, merged_data_info, total_usage, crop_images or None
+
+
+def _run_glm_page_image_mode(
+    pdf_path: Path, auth_token: str, page_count: int, debug: bool
+) -> tuple[dict, str, dict | None]:
+    """Run per-page image OCR and build the downstream result shape.
+
+    Returns (result_dict, markdown_content, cached_page_images).
+    Mirrors the original inline behavior, incl. writing usage into the
+    module-global _conversion_metadata."""
+    global _conversion_metadata
+    merged_md, merged_layout, merged_data_info, total_usage, cached_page_images = (
+        _glm_ocr_via_page_images(
+            pdf_path, auth_token, page_count,
+            render_scale=3.0, max_workers=3, debug=debug,
+        )
+    )
+    if total_usage:
+        _conversion_metadata["usage"] = total_usage
+    result = {
+        "md_results": merged_md,
+        "layout_details": merged_layout,
+        "data_info": merged_data_info,
+    }
+    return result, merged_md, cached_page_images
 
 
 def convert_with_glm_ocr(
@@ -1473,21 +1567,9 @@ def convert_with_glm_ocr(
 
     if use_image_mode:
         # --- Per-page image mode ---
-        merged_md, merged_layout, merged_data_info, total_usage, cached_page_images = (
-            _glm_ocr_via_page_images(
-                pdf_path, auth_token, page_count, render_scale=3.0, debug=debug,
-            )
+        result, markdown_content, cached_page_images = _run_glm_page_image_mode(
+            pdf_path, auth_token, page_count, debug
         )
-        if total_usage:
-            _conversion_metadata["usage"] = total_usage
-
-        # Build a synthetic result dict for the bbox extraction pipeline below
-        result = {
-            "md_results": merged_md,
-            "layout_details": merged_layout,
-            "data_info": merged_data_info,
-        }
-        markdown_content = merged_md
     else:
         # --- URL direct mode: single API call (with response caching in debug mode) ---
         cache_path = pdf_path.with_suffix(".glm-ocr.json")
@@ -1543,7 +1625,7 @@ def convert_with_glm_ocr(
                         if attempt < max_retries - 1:
                             time.sleep(2 ** attempt)
                             continue
-                        output_error(last_error)
+                        break
 
                     result = response.json()
                     break
@@ -1553,19 +1635,28 @@ def convert_with_glm_ocr(
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                         continue
-                    output_error(
-                        last_error, "The PDF may be too complex. Try a local engine."
-                    )
+                    break
                 except requests.RequestException as e:
                     last_error = f"GLM-OCR API request failed: {e}"
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                         continue
-                    output_error(last_error)
+                    break
             else:
-                output_error(last_error or "GLM-OCR API failed after all retries")
+                last_error = last_error or "GLM-OCR API failed after all retries"
 
-            if debug:
+            if result is None:
+                print(
+                    "GLM-OCR: URL mode failed after retries "
+                    f"({last_error or 'unknown error'}); "
+                    "falling back to per-page image mode",
+                    file=sys.stderr,
+                )
+                _conversion_metadata["mode"] = "page-images (url-fallback)"
+                result, _fb_md, cached_page_images = _run_glm_page_image_mode(
+                    pdf_path, auth_token, page_count, debug
+                )
+            elif debug:
                 cache_path.write_text(
                     json.dumps(result, ensure_ascii=False), encoding="utf-8"
                 )
