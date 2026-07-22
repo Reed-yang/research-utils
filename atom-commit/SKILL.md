@@ -37,7 +37,7 @@ Conventional Commits, English, imperative mood:
                                      ← blank line
 <body>                               ← what and why, wrap at 72
                                      ← blank line
-Co-Authored-By: Claude <noreply@anthropic.com>
+Assisted-By: <model> via <harness>
 ```
 
 Example:
@@ -47,8 +47,19 @@ feat(ingestion): add GLM-OCR cloud engine support
 Integrate Zhipu GLM-OCR as an alternative OCR backend for documents
 where local MinerU produces poor results.
 
-Co-Authored-By: Claude <noreply@anthropic.com>
+Assisted-By: GPT-5.6 SOL via Claude Code
 ```
+
+## Commit Attribution
+
+- Always append exactly one `Assisted-By: <model> via <harness>` trailer
+- Identify the harness from the active client, such as `Claude Code`, `Codex CLI`, or `Codex App`
+- Resolve the model from current session metadata first, then an explicit runtime environment or session setting, then persistent harness config when no session override is active
+- Prefer the runtime display name; otherwise preserve the exact model ID and only normalize capitalization or separators when unambiguous
+- When the harness is already named separately, remove an unambiguous harness routing prefix; for example, render `claude-gpt-5-6-sol` as `GPT-5.6 SOL via Claude Code`
+- Use `Unknown model` rather than guessing when the exact model cannot be verified
+- Do not add a second native or provider attribution trailer
+- Replace the trailer with `Co-Authored-By: <model> via <harness> <email>` only when the user or repository explicitly requires GitHub co-author semantics and supplies the exact trusted email
 
 ## Constraints
 
