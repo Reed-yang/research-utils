@@ -13,14 +13,14 @@ research-utils/             ← project root
 ├── subtitle-translate/     ← SRT subtitle translation (Python script)
 ├── review-research-plan/   ← Research plan critical review & iterative polishing (SKILL.md + commands/ + references/, Claude built-in)
 ├── claude-sync/            ← Cross-device ~/.claude sync with conflict resolution (SKILL.md only, Claude built-in)
-├── atom-commit/            ← Atomic git commits with professional messages (SKILL.md only, Claude built-in)
+├── atom-commit/            ← Atomic git commits with exact model attribution (SKILL.md + resolver script)
 └── afk/                    ← Autonomous task execution until all planned work is done (SKILL.md only, Claude built-in)
 ```
 
 ### Two Types of Skills
 
 - **Script-based** (paper-ingestion, paper-translate, subtitle-translate): have a `scripts/` directory, executed via `uv run`, require API keys
-- **Built-in** (paper-summary, paper-validator, review-research-plan, claude-sync, atom-commit, afk): contain only SKILL.md (+ optional commands/ and references/ for multi-file skills), executed directly by Claude, no external dependencies
+- **Built-in** (paper-summary, paper-validator, review-research-plan, claude-sync, atom-commit, afk): use SKILL.md workflows and may bundle lightweight standard-library helpers, executed directly by the agent without installed dependencies
 
 ## Standard Workflow
 
