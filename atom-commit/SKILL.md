@@ -21,10 +21,11 @@ Analyze uncommitted changes, write professional commit messages, and split large
 
 ## When to Pause and Ask
 
-Default is **execute without preview**. Only ask the user in these two cases:
+Default is **execute without preview**. Only ask the user in these three cases:
 
 1. **Ambiguous atomicity** — the changeset is complex and there are multiple reasonable ways to split; present the proposed plan and ask for confirmation
 2. **Uncertain files** — a file looks like it might not belong (generated files, `.env`, credentials, unrelated temp files); ask whether to include it
+3. **Unresolved attribution** — the complete canonical model slug is unavailable; pause before committing and ask for or verify the exact slug
 
 Everything else: just commit.
 
@@ -47,17 +48,18 @@ feat(ingestion): add GLM-OCR cloud engine support
 Integrate Zhipu GLM-OCR as an alternative OCR backend for documents
 where local MinerU produces poor results.
 
-Assisted-By: GPT-5.6 SOL via Claude Code
+Assisted-By: gpt-5.6-sol via Claude Code
 ```
 
 ## Commit Attribution
 
 - Always append exactly one `Assisted-By: <model> via <harness>` trailer
 - Identify the harness from the active client, such as `Claude Code`, `Codex CLI`, or `Codex App`
-- Resolve the model from current session metadata first, then an explicit runtime environment or session setting, then persistent harness config when no session override is active
-- Prefer the runtime display name; otherwise preserve the exact model ID and only normalize capitalization or separators when unambiguous
-- When the harness is already named separately, remove an unambiguous harness routing prefix; for example, render `claude-gpt-5-6-sol` as `GPT-5.6 SOL via Claude Code`
-- Use `Unknown model` rather than guessing when the exact model cannot be verified
+- Record the complete canonical model slug, such as `gpt-5.6-sol`; never shorten it to a family or display label such as `GPT-5` or `GPT-5.6`
+- Resolve the slug from current session metadata first, then an explicit runtime environment or session setting, then persistent harness config when no session override is active
+- Preserve the canonical slug's lowercase spelling, punctuation, and variant suffix
+- Map a harness routing alias only when its underlying slug is explicit; for example, render local route `claude-gpt-5-6-sol` as `gpt-5.6-sol via Claude Code`
+- Pause before committing when the complete slug cannot be verified; never use `Unknown model` or a broader model family as fallback
 - Do not add a second native or provider attribution trailer
 - Replace the trailer with `Co-Authored-By: <model> via <harness> <email>` only when the user or repository explicitly requires GitHub co-author semantics and supplies the exact trusted email
 
